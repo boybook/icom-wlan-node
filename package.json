@@ -1,6 +1,6 @@
 {
-  "name": "@boybook/icom-wlan",
-  "version": "0.1.0",
+  "name": "icom-wlan-node",
+  "version": "0.1.1",
   "description": "Icom WLAN (CI‑V, audio) protocol implementation for Node.js/TypeScript.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "clean": "rimraf dist",
     "test": "jest",
+    "prepublishOnly": "npm run build",
     "lint": "eslint ."
   },
   "keywords": ["icom", "civ", "cat", "udp", "hamradio", "wlan", "audio"],

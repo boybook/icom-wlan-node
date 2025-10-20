@@ -1,4 +1,4 @@
-# @boybook/icom-wlan
+# icom-wlan-node
 
 Icom WLAN (UDP) protocol implementation in Node.js + TypeScript, featuring:
 
@@ -16,7 +16,7 @@ Acknowledgements: Thanks to FT8CN (https://github.com/N0BOY/FT8CN) for sharing p
 ## Install
 
 ```
-npm install @boybook/icom-wlan
+npm install icom-wlan-node
 ```
 
 Build from source:
@@ -29,7 +29,7 @@ npm run build
 ## Quick Start
 
 ```ts
-import { IcomControl, AUDIO_RATE } from '@boybook/icom-wlan';
+import { IcomControl, AUDIO_RATE } from 'icom-wlan-node';
 
 const rig = new IcomControl({
   control: { ip: '192.168.1.50', port: 50001 },
