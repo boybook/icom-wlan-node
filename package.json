@@ -15,7 +15,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://example.com/ft8cn.git"
+    "url": "https://github.com/boybook/icom-wlan-node.git"
   },
   "files": ["dist"],
   "devDependencies": {
