@@ -127,6 +127,7 @@ The library exposes common CI‑V operations as friendly methods. Addresses are 
 - `readSWR(options?: QueryOptions) => Promise<{ raw: number; swr: number; alert: boolean } | null>`
 - `readALC(options?: QueryOptions) => Promise<{ raw: number; percent: number; alert: boolean } | null>`
 - `getConnectorWLanLevel(options?: QueryOptions) => Promise<{ raw: number; percent: number } | null>`
+- `getLevelMeter(options?: QueryOptions) => Promise<{ raw: number; percent: number } | null>`
 - `setConnectorWLanLevel(level: number)`
 - `setConnectorDataMode(mode: ConnectorDataMode | number)`
 
@@ -155,8 +156,13 @@ await rig.setPtt(false);
 const swr = await rig.readSWR({ timeout: 2000 });
 const alc = await rig.readALC({ timeout: 2000 });
 const wlanLevel = await rig.getConnectorWLanLevel({ timeout: 2000 });
+const level = await rig.getLevelMeter({ timeout: 1500 });
 await rig.setConnectorWLanLevel(0x0120);
 await rig.setConnectorDataMode(0x01); // e.g., DATA
+
+if (level) {
+  console.log(`Generic Level Meter: raw=${level.raw} (${level.percent.toFixed(1)}%)`);
+}
 ```
 
 ## Design Notes

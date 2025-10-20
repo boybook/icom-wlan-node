@@ -174,6 +174,14 @@ async function test() {
     console.log(stamp(), '  ℹ WLAN Level: Not available (may not be supported on this radio)');
   }
 
+  // Experimental: generic level meter (0-255) from 0x15/0x02
+  const level = await rig.getLevelMeter({ timeout: 1500 });
+  if (level) {
+    console.log(stamp(), `  ✓ Level Meter: ${level.percent.toFixed(1)}% (raw=${level.raw}/255)`);
+  } else {
+    console.log(stamp(), '  ℹ Level Meter: Not available');
+  }
+
   // Test setting WLAN level
   console.log(stamp(), '  → Setting WLAN level to 128 (50%)');
   await rig.setConnectorWLanLevel(128);
@@ -299,6 +307,12 @@ async function test() {
         console.log(stamp(), `    ALC: ${alc.percent.toFixed(1)}% (raw=${alc.raw}) ${alcStatus}`);
       } else {
         console.log(stamp(), `    ALC: Not available`);
+      }
+
+      // Also read experimental level meter during TX
+      const levelTx = await rig.getLevelMeter({ timeout: 1500 });
+      if (levelTx) {
+        console.log(stamp(), `    Level Meter: ${levelTx.percent.toFixed(1)}% (raw=${levelTx.raw}/255)`);
       }
     }
 

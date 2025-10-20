@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 import { CapCapabilitiesPacket, Cmd, ControlPacket, LoginPacket, LoginResponsePacket, RadioCapPacket, Sizes, StatusPacket, TokenPacket, TokenType, ConnInfoPacket, AUDIO_SAMPLE_RATE, XIEGU_TX_BUFFER_SIZE, PingPacket, CivPacket } from '../core/IcomPackets';
 import { dbg, dbgV } from '../utils/debug';
 import { Session } from '../core/Session';
-import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading } from '../types';
+import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading } from '../types';
 import { IcomCiv } from './IcomCiv';
 import { IcomAudio } from './IcomAudio';
 import { IcomRigCommands } from './IcomRigCommands';
@@ -366,6 +366,30 @@ export class IcomControl {
     return {
       raw,
       percent: (raw / METER_THRESHOLDS.WLAN_LEVEL_MAX) * 100
+    };
+  }
+
+  /**
+   * Read generic level meter (CI-V 0x15/0x02), raw 0-255.
+   * Many rigs return two bytes and the low byte is the level.
+   */
+  async getLevelMeter(options?: QueryOptions): Promise<LevelMeterReading | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.getLevelMeter(ctrAddr, rigAddr);
+    const resp = await this.waitForCivFrame(
+      (frame) => IcomControl.isMeterReply(frame, 0x02, ctrAddr, rigAddr),
+      timeoutMs,
+      () => this.sendCiv(req)
+    );
+    if (!resp) return null;
+    const data = resp.subarray(6, resp.length - 1);
+    if (data.length === 0) return null;
+    const raw = data[data.length - 1] & 0xff; // use low byte as 0-255 level
+    return {
+      raw,
+      percent: (raw / 255) * 100
     };
   }
 

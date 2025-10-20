@@ -179,3 +179,14 @@ export interface WlanLevelReading {
    */
   percent: number;
 }
+
+/**
+ * Generic level meter (0-255) reading
+ * For CI-V 0x15/0x02 experimental level meter
+ */
+export interface LevelMeterReading {
+  /** Raw 0-255 value */
+  raw: number;
+  /** Percentage (0-100%) */
+  percent: number;
+}
