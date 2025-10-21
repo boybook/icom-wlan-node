@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 import { CapCapabilitiesPacket, Cmd, ControlPacket, LoginPacket, LoginResponsePacket, RadioCapPacket, Sizes, StatusPacket, TokenPacket, TokenType, ConnInfoPacket, AUDIO_SAMPLE_RATE, XIEGU_TX_BUFFER_SIZE, PingPacket, CivPacket } from '../core/IcomPackets';
 import { dbg, dbgV } from '../utils/debug';
 import { Session } from '../core/Session';
-import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo } from '../types';
+import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics } from '../types';
 import { IcomCiv } from './IcomCiv';
 import { IcomAudio } from './IcomAudio';
 import { IcomRigCommands } from './IcomRigCommands';
@@ -23,10 +23,15 @@ export class IcomControl {
   private civAssembleBuf: Buffer = Buffer.alloc(0); // CIV stream reassembler
   private meterTimer?: NodeJS.Timeout;
 
-  // Connection state
-  private connectPromise: Promise<void> | null = null;
-  private isFullReconnecting = false;
-  private abortConnection?: (reason: string) => void; // Fast-fail mechanism for connection attempts
+  // Connection state machine (replaces old fragmented state flags)
+  private connectionSession: ConnectionSession = {
+    phase: ConnectionPhase.IDLE,
+    sessionId: 0,
+    startTime: Date.now()
+  };
+  private nextSessionId = 1;
+  // Map of sessionId -> abort function for cancelling ongoing connection attempts
+  private abortHandlers = new Map<number, (reason: string) => void>();
 
   // Unified connection monitoring
   private monitorTimer?: NodeJS.Timeout;
@@ -77,29 +82,134 @@ export class IcomControl {
 
   get events(): RigEventEmitter { return this.ev; }
 
+  // ============================================================================
+  // State Machine Management
+  // ============================================================================
+
   /**
-   * Connect to the rig (idempotent - returns same promise if already connecting)
+   * Transition to a new connection phase with logging
+   * @private
+   */
+  private transitionTo(newPhase: ConnectionPhase, reason: string) {
+    const oldPhase = this.connectionSession.phase;
+    if (oldPhase === newPhase) return; // No-op if already in target phase
+
+    dbg(`State transition: ${oldPhase} → ${newPhase} (${reason})`);
+    this.connectionSession.phase = newPhase;
+
+    // Update timestamps based on phase
+    if (newPhase === ConnectionPhase.CONNECTING || newPhase === ConnectionPhase.RECONNECTING) {
+      this.connectionSession.startTime = Date.now();
+    } else if (newPhase === ConnectionPhase.IDLE) {
+      // Record disconnect time when entering IDLE
+      this.connectionSession.lastDisconnectTime = Date.now();
+    }
+  }
+
+  /**
+   * Validate if a state transition is legal
+   * @private
+   */
+  private canTransitionTo(targetPhase: ConnectionPhase): boolean {
+    const current = this.connectionSession.phase;
+
+    // Define valid state transitions
+    const validTransitions: Record<ConnectionPhase, ConnectionPhase[]> = {
+      [ConnectionPhase.IDLE]: [ConnectionPhase.CONNECTING],
+      [ConnectionPhase.CONNECTING]: [ConnectionPhase.CONNECTED, ConnectionPhase.DISCONNECTING, ConnectionPhase.IDLE],
+      [ConnectionPhase.CONNECTED]: [ConnectionPhase.DISCONNECTING, ConnectionPhase.RECONNECTING],
+      [ConnectionPhase.DISCONNECTING]: [ConnectionPhase.IDLE],
+      [ConnectionPhase.RECONNECTING]: [ConnectionPhase.CONNECTED, ConnectionPhase.IDLE]
+    };
+
+    return validTransitions[current]?.includes(targetPhase) ?? false;
+  }
+
+  /**
+   * Abort an ongoing connection attempt by session ID
+   * @private
+   */
+  private abortConnectionAttempt(sessionId: number, reason: string) {
+    const abortHandler = this.abortHandlers.get(sessionId);
+    if (abortHandler) {
+      dbg(`Aborting connection session ${sessionId}: ${reason}`);
+      abortHandler(reason);
+      this.abortHandlers.delete(sessionId);
+    }
+  }
+
+  // ============================================================================
+  // Connection Methods
+  // ============================================================================
+
+  /**
+   * Connect to the rig
+   * Idempotent: multiple calls during CONNECTING phase are safe
+   * @throws Error if called during DISCONNECTING phase
    */
   async connect() {
-    // If already connecting, return the same promise
-    if (this.connectPromise) {
-      dbg('connect() called while already connecting - reusing existing promise');
-      return this.connectPromise;
+    const currentPhase = this.connectionSession.phase;
+
+    // If already connected, return immediately
+    if (currentPhase === ConnectionPhase.CONNECTED) {
+      dbg('connect() called but already CONNECTED - returning immediately');
+      return;
     }
 
-    this.connectPromise = this._doConnect()
-      .finally(() => { this.connectPromise = null; });
+    // If already connecting or reconnecting, wait for completion (idempotent)
+    if (currentPhase === ConnectionPhase.CONNECTING || currentPhase === ConnectionPhase.RECONNECTING) {
+      dbg(`connect() called while ${currentPhase} - idempotent behavior, will wait`);
+      // Return a promise that resolves when state changes to CONNECTED
+      return new Promise<void>((resolve, reject) => {
+        const checkState = () => {
+          if (this.connectionSession.phase === ConnectionPhase.CONNECTED) {
+            resolve();
+          } else if (this.connectionSession.phase === ConnectionPhase.IDLE) {
+            reject(new Error('Connection failed'));
+          } else {
+            setTimeout(checkState, 100);
+          }
+        };
+        checkState();
+      });
+    }
 
-    return this.connectPromise;
+    // Reject if in DISCONNECTING phase
+    if (currentPhase === ConnectionPhase.DISCONNECTING) {
+      throw new Error('Cannot connect while disconnecting - wait for IDLE state');
+    }
+
+    // Only IDLE state can transition to CONNECTING
+    if (!this.canTransitionTo(ConnectionPhase.CONNECTING)) {
+      throw new Error(`Cannot connect from ${currentPhase} state`);
+    }
+
+    // Start new connection session
+    const sessionId = this.nextSessionId++;
+    this.connectionSession.sessionId = sessionId;
+    this.transitionTo(ConnectionPhase.CONNECTING, `User connect() - sessionId=${sessionId}`);
+
+    try {
+      await this._doConnect(sessionId);
+      this.transitionTo(ConnectionPhase.CONNECTED, 'All sessions ready');
+      dbg(`Connection session ${sessionId} established successfully`);
+    } catch (err) {
+      // Clean up abort handler
+      this.abortHandlers.delete(sessionId);
+      // Transition to IDLE on failure
+      this.transitionTo(ConnectionPhase.IDLE, `Connection failed: ${err instanceof Error ? err.message : String(err)}`);
+      throw err;
+    }
   }
 
   /**
    * Internal connection implementation
    * Uses local promises to avoid race conditions
    * Uses phased timeout: 30s for overall, 10s for sub-sessions after login
+   * @param sessionId - Unique session ID to prevent race conditions
    */
-  private async _doConnect() {
-    const { loginReady, civReady, audioReady, cleanup } = this.createReadyPromises();
+  private async _doConnect(sessionId: number) {
+    const { loginReady, civReady, audioReady, cleanup } = this.createReadyPromises(sessionId);
 
     try {
       // Reset all session states to initial values
@@ -148,8 +258,9 @@ export class IcomControl {
   /**
    * Create local promises for connection readiness
    * This avoids race conditions with instance variables
+   * @param sessionId - Connection session ID for abort handler tracking
    */
-  private createReadyPromises() {
+  private createReadyPromises(sessionId: number) {
     let resolveLogin: () => void;
     let resolveCiv: () => void;
     let resolveAudio: () => void;
@@ -170,14 +281,16 @@ export class IcomControl {
       rejectAudio = reject;
     });
 
-    // Store abort handler to allow external cancellation
-    this.abortConnection = (reason: string) => {
-      dbg(`Aborting connection: ${reason}`);
+    // Store abort handler bound to this specific sessionId
+    // This prevents race conditions when multiple connection attempts overlap
+    const abortHandler = (reason: string) => {
+      dbg(`Aborting connection session ${sessionId}: ${reason}`);
       const error = new Error(reason);
       rejectLogin(error);
       rejectCiv(error);
       rejectAudio(error);
     };
+    this.abortHandlers.set(sessionId, abortHandler);
 
     // Temporary event listeners (local scope)
     const onLogin = (res: LoginResult) => {
@@ -204,7 +317,10 @@ export class IcomControl {
       civReady,
       audioReady,
       cleanup: () => {
-        this.abortConnection = undefined; // Clear abort handler
+        // Remove abort handler for this specific sessionId
+        // This is safe because the connection attempt is complete (success or failure)
+        this.abortHandlers.delete(sessionId);
+        // Remove event listeners
         this.ev.off('login', onLogin);
         this.ev.off('_civReady', onCivReady);
         this.ev.off('_audioReady', onAudioReady);
@@ -221,8 +337,10 @@ export class IcomControl {
     this.stopUnifiedMonitoring();
 
     this.monitorTimer = setInterval(() => {
-      // Skip checking if currently reconnecting
-      if (this.isFullReconnecting) return;
+      // Only monitor when CONNECTED (not during CONNECTING, RECONNECTING, DISCONNECTING, or IDLE)
+      if (this.connectionSession.phase !== ConnectionPhase.CONNECTED) {
+        return;
+      }
 
       const now = Date.now();
       const sessions = [
@@ -257,44 +375,90 @@ export class IcomControl {
   }
 
   async disconnect() {
-    // 0. Cancel any ongoing connection attempts
-    if (this.connectPromise) {
-      dbg('Cancelling ongoing connection...');
-      this.connectPromise = null;
+    const currentPhase = this.connectionSession.phase;
+
+    // If already disconnecting or idle, avoid duplicate work
+    if (currentPhase === ConnectionPhase.DISCONNECTING) {
+      dbg('disconnect() called but already DISCONNECTING - waiting for completion');
+      // Wait for transition to IDLE
+      return new Promise<void>((resolve) => {
+        const checkState = () => {
+          if (this.connectionSession.phase === ConnectionPhase.IDLE) {
+            resolve();
+          } else {
+            setTimeout(checkState, 100);
+          }
+        };
+        checkState();
+      });
     }
 
-    // 1. Stop all timers first to prevent interference
-    this.stopUnifiedMonitoring(); // Stop unified monitoring
-    if (this.tokenTimer) { clearInterval(this.tokenTimer); this.tokenTimer = undefined; }
-    this.stopMeterPolling();
-    this.sess.stopTimers();
-    if (this.civSess) this.civSess.stopTimers();
-    if (this.audioSess) this.audioSess.stopTimers();
-
-    // 2. Send DELETE token packet
-    const del = TokenPacket.build(0, this.sess.localId, this.sess.remoteId, TokenType.DELETE, this.sess.innerSeq, this.sess.localToken, this.sess.rigToken);
-    this.sess.innerSeq = (this.sess.innerSeq + 1) & 0xffff;
-    this.sess.sendTracked(del);
-
-    // 3. Send CMD_DISCONNECT to all sessions
-    this.sess.sendUntracked(ControlPacket.toBytes(Cmd.DISCONNECT, 0, this.sess.localId, this.sess.remoteId));
-    if (this.civSess) {
-      this.civ.sendOpenClose(false);
-      this.civSess.sendUntracked(ControlPacket.toBytes(Cmd.DISCONNECT, 0, this.civSess.localId, this.civSess.remoteId));
-    }
-    if (this.audioSess) {
-      this.audioSess.sendUntracked(ControlPacket.toBytes(Cmd.DISCONNECT, 0, this.audioSess.localId, this.audioSess.remoteId));
+    if (currentPhase === ConnectionPhase.IDLE) {
+      dbg('disconnect() called but already IDLE - no-op');
+      return;
     }
 
-    // 4. Wait 200ms to ensure UDP packets are sent before closing sockets
-    await new Promise(resolve => setTimeout(resolve, 200));
+    // Abort any ongoing connection attempts
+    const currentSessionId = this.connectionSession.sessionId;
+    if (currentPhase === ConnectionPhase.CONNECTING || currentPhase === ConnectionPhase.RECONNECTING) {
+      dbg(`Aborting ongoing connection attempt (sessionId=${currentSessionId})`);
+      this.abortConnectionAttempt(currentSessionId, 'User disconnect()');
+    }
 
-    // 5. Stop streams and close sockets
-    this.civ.stop();
-    this.audio.stop(); // Stop continuous audio transmission
-    this.sess.close();
-    if (this.civSess) this.civSess.close();
-    if (this.audioSess) this.audioSess.close();
+    // Transition to DISCONNECTING state
+    this.transitionTo(ConnectionPhase.DISCONNECTING, 'User disconnect()');
+
+    try {
+      // 1. Stop all timers first to prevent interference
+      this.stopUnifiedMonitoring(); // Stop unified monitoring
+      if (this.tokenTimer) { clearInterval(this.tokenTimer); this.tokenTimer = undefined; }
+      this.stopMeterPolling();
+      this.sess.stopTimers();
+      if (this.civSess) this.civSess.stopTimers();
+      if (this.audioSess) this.audioSess.stopTimers();
+
+      // 2. Send DELETE token packet
+      try {
+        const del = TokenPacket.build(0, this.sess.localId, this.sess.remoteId, TokenType.DELETE, this.sess.innerSeq, this.sess.localToken, this.sess.rigToken);
+        this.sess.innerSeq = (this.sess.innerSeq + 1) & 0xffff;
+        this.sess.sendTracked(del);
+      } catch (err) {
+        dbg('Failed to send DELETE token packet:', err);
+        // Continue with disconnect even if this fails
+      }
+
+      // 3. Send CMD_DISCONNECT to all sessions
+      try {
+        this.sess.sendUntracked(ControlPacket.toBytes(Cmd.DISCONNECT, 0, this.sess.localId, this.sess.remoteId));
+        if (this.civSess) {
+          this.civ.sendOpenClose(false);
+          this.civSess.sendUntracked(ControlPacket.toBytes(Cmd.DISCONNECT, 0, this.civSess.localId, this.civSess.remoteId));
+        }
+        if (this.audioSess) {
+          this.audioSess.sendUntracked(ControlPacket.toBytes(Cmd.DISCONNECT, 0, this.audioSess.localId, this.audioSess.remoteId));
+        }
+      } catch (err) {
+        dbg('Failed to send DISCONNECT packets:', err);
+        // Continue with disconnect even if this fails
+      }
+
+      // 4. Wait 200ms to ensure UDP packets are sent before closing sockets
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+      // 5. Stop streams and close sockets
+      this.civ.stop();
+      this.audio.stop(); // Stop continuous audio transmission
+      this.sess.close();
+      if (this.civSess) this.civSess.close();
+      if (this.audioSess) this.audioSess.close();
+
+    } catch (err) {
+      dbg('Error during disconnect:', err);
+      // Continue to IDLE state even if there were errors
+    } finally {
+      // Always transition to IDLE at the end
+      this.transitionTo(ConnectionPhase.IDLE, 'Disconnect complete');
+    }
   }
 
   sendCiv(data: Buffer) { this.civ.sendCivData(data); }
@@ -781,11 +945,12 @@ export class IcomControl {
           dbg('Radio reported connected=false');
 
           // If we're currently attempting to connect, abort immediately (fast-fail)
-          if (this.connectPromise && this.abortConnection) {
+          const currentPhase = this.connectionSession.phase;
+          if (currentPhase === ConnectionPhase.CONNECTING || currentPhase === ConnectionPhase.RECONNECTING) {
             dbg('Aborting ongoing connection attempt due to connected=false');
-            this.abortConnection('Radio reported connected=false');
-          } else {
-            // Otherwise, trigger reconnection for established connection
+            this.abortConnectionAttempt(this.connectionSession.sessionId, 'Radio reported connected=false');
+          } else if (currentPhase === ConnectionPhase.CONNECTED) {
+            // Trigger reconnection for established connection
             dbg('Triggering reconnection for established connection');
             this.handleConnectionLost(SessionType.CONTROL, 0);
           }
@@ -1177,11 +1342,14 @@ export class IcomControl {
    * @private
    */
   private handleConnectionLost(sessionType: SessionType, timeSinceLastData: number) {
+    // Record disconnect time for downtime calculation
+    this.connectionSession.lastDisconnectTime = Date.now();
+
     const info: ConnectionLostInfo = {
       sessionType,
       reason: `No data received for ${timeSinceLastData}ms`,
       timeSinceLastData,
-      timestamp: Date.now()
+      timestamp: this.connectionSession.lastDisconnectTime
     };
     dbg(`Connection lost: ${sessionType} session (${timeSinceLastData}ms since last data)`);
     this.ev.emit('connectionLost', info);
@@ -1189,6 +1357,14 @@ export class IcomControl {
     // Check if auto-reconnect is enabled
     if (!this.monitorConfig.autoReconnect) {
       dbg(`Auto-reconnect disabled, not attempting reconnect`);
+      // Transition to IDLE since we won't reconnect
+      this.transitionTo(ConnectionPhase.IDLE, 'Connection lost, auto-reconnect disabled');
+      return;
+    }
+
+    // Validate state transition to RECONNECTING
+    if (!this.canTransitionTo(ConnectionPhase.RECONNECTING)) {
+      dbg(`Cannot transition to RECONNECTING from ${this.connectionSession.phase} - skipping reconnect`);
       return;
     }
 
@@ -1204,85 +1380,105 @@ export class IcomControl {
    * @private
    */
   private async scheduleFullReconnect() {
-    if (this.isFullReconnecting) {
+    // Prevent multiple concurrent reconnect attempts
+    if (this.connectionSession.phase === ConnectionPhase.RECONNECTING) {
       dbg('Full reconnect already in progress, skipping');
       return;
     }
 
-    this.isFullReconnecting = true;
+    // Transition to RECONNECTING state
+    this.transitionTo(ConnectionPhase.RECONNECTING, 'Starting full reconnect');
 
     let attempt = 0;
+    const disconnectTime = this.connectionSession.lastDisconnectTime || Date.now();
 
-    while (true) {
-      attempt++;
-      const delay = this.calculateReconnectDelay(attempt);
+    try {
+      while (true) {
+        attempt++;
+        const delay = this.calculateReconnectDelay(attempt);
 
-      // Emit reconnect attempting event
-      this.ev.emit('reconnectAttempting', {
-        sessionType: SessionType.CONTROL,
-        attemptNumber: attempt,
-        delay,
-        timestamp: Date.now(),
-        fullReconnect: true
-      });
-
-      dbg(`Full reconnect attempt #${attempt} (delay: ${delay}ms)`);
-      await this.sleep(delay);
-
-      try {
-        // Disconnect all sessions
-        dbg('Full reconnect: disconnecting all sessions');
-        await this.disconnect();
-
-        // Wait longer before reconnecting to allow rig to fully clean up old connection
-        // This is critical - rig may report CONNINFO busy=true if we reconnect too quickly
-        dbg('Full reconnect: waiting 5s for rig to clean up old session...');
-        await this.sleep(5000);
-
-        // Reconnect with timeout
-        dbg('Full reconnect: reconnecting');
-        await this.connectWithTimeout(30000);
-
-        // Success!
-        dbg('Full reconnect successful!');
-        const finalState = this.getConnectionState();
-        dbg(`Reconnect complete - All sessions: Control=${finalState.control}, CIV=${finalState.civ}, Audio=${finalState.audio}`);
-        this.isFullReconnecting = false;
-        return;
-
-      } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        dbg('Full reconnect failed:', errorMsg);
-
-        // Get current connection state for diagnostics
-        const state = this.getConnectionState();
-        dbg(`Current state after failed reconnect: Control=${state.control}, CIV=${state.civ}, Audio=${state.audio}`);
-
-        // Check if we should retry
-        const maxAttempts = this.monitorConfig.maxReconnectAttempts;
-        const willRetry = maxAttempts === undefined || attempt < maxAttempts;
-
-        // Emit reconnect failed event
-        this.ev.emit('reconnectFailed', {
+        // Emit reconnect attempting event
+        this.ev.emit('reconnectAttempting', {
           sessionType: SessionType.CONTROL,
           attemptNumber: attempt,
-          error: errorMsg,
+          delay,
           timestamp: Date.now(),
-          fullReconnect: true,
-          willRetry,
-          nextRetryDelay: willRetry ? this.calculateReconnectDelay(attempt + 1) : undefined
+          fullReconnect: true
         });
 
-        if (!willRetry) {
-          dbg(`Max reconnect attempts (${maxAttempts}) reached, giving up`);
-          dbg(`Final state: Control=${state.control}, CIV=${state.civ}, Audio=${state.audio}`);
-          this.isFullReconnecting = false;
-          return;
-        }
+        dbg(`Full reconnect attempt #${attempt} (delay: ${delay}ms)`);
+        await this.sleep(delay);
 
-        // Continue loop for retry
-        dbg(`Will retry in ${this.calculateReconnectDelay(attempt + 1)}ms...`);
+        try {
+          // Disconnect all sessions
+          dbg('Full reconnect: disconnecting all sessions');
+          await this.disconnect();
+
+          // Wait longer before reconnecting to allow rig to fully clean up old connection
+          // This is critical - rig may report CONNINFO busy=true if we reconnect too quickly
+          dbg('Full reconnect: waiting 5s for rig to clean up old session...');
+          await this.sleep(5000);
+
+          // Reconnect with timeout (uses new state-machine-based connect())
+          dbg('Full reconnect: reconnecting');
+          await this.connectWithTimeout(30000);
+
+          // Success! Calculate downtime and emit connectionRestored event
+          const downtime = Date.now() - disconnectTime;
+          dbg(`Full reconnect successful! Downtime: ${downtime}ms`);
+
+          const finalState = this.getConnectionState();
+          dbg(`Reconnect complete - All sessions: Control=${finalState.control}, CIV=${finalState.civ}, Audio=${finalState.audio}`);
+
+          // Emit connectionRestored event (fixes Problem #5)
+          this.ev.emit('connectionRestored', {
+            sessionType: SessionType.CONTROL,
+            downtime,
+            timestamp: Date.now()
+          });
+
+          // State is already CONNECTED from connect() call
+          return;
+
+        } catch (err) {
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          dbg('Full reconnect failed:', errorMsg);
+
+          // Get current connection state for diagnostics
+          const state = this.getConnectionState();
+          dbg(`Current state after failed reconnect: Control=${state.control}, CIV=${state.civ}, Audio=${state.audio}`);
+
+          // Check if we should retry
+          const maxAttempts = this.monitorConfig.maxReconnectAttempts;
+          const willRetry = maxAttempts === undefined || attempt < maxAttempts;
+
+          // Emit reconnect failed event
+          this.ev.emit('reconnectFailed', {
+            sessionType: SessionType.CONTROL,
+            attemptNumber: attempt,
+            error: errorMsg,
+            timestamp: Date.now(),
+            fullReconnect: true,
+            willRetry,
+            nextRetryDelay: willRetry ? this.calculateReconnectDelay(attempt + 1) : undefined
+          });
+
+          if (!willRetry) {
+            dbg(`Max reconnect attempts (${maxAttempts}) reached, giving up`);
+            dbg(`Final state: Control=${state.control}, CIV=${state.civ}, Audio=${state.audio}`);
+            // Transition to IDLE since we're giving up
+            this.transitionTo(ConnectionPhase.IDLE, 'Max reconnect attempts reached');
+            return;
+          }
+
+          // Continue loop for retry
+          dbg(`Will retry in ${this.calculateReconnectDelay(attempt + 1)}ms...`);
+        }
       }
+    } catch (err) {
+      // Unexpected error in reconnect loop
+      dbg('Unexpected error in scheduleFullReconnect:', err);
+      this.transitionTo(ConnectionPhase.IDLE, 'Reconnect loop error');
     }
   }
 
@@ -1316,5 +1512,35 @@ export class IcomControl {
   private calculateReconnectDelay(attemptNumber: number): number {
     const delay = this.monitorConfig.reconnectBaseDelay * Math.pow(2, attemptNumber - 1);
     return Math.min(delay, this.monitorConfig.reconnectMaxDelay);
+  }
+
+  // ============================================================================
+  // Public Observability APIs
+  // ============================================================================
+
+  /**
+   * Get current connection phase
+   * @returns Current connection phase (IDLE, CONNECTING, CONNECTED, etc.)
+   */
+  getConnectionPhase(): ConnectionPhase {
+    return this.connectionSession.phase;
+  }
+
+  /**
+   * Get detailed connection metrics for monitoring and diagnostics
+   * @returns Connection metrics including phase, uptime, session states
+   */
+  getConnectionMetrics(): ConnectionMetrics {
+    const now = Date.now();
+    return {
+      phase: this.connectionSession.phase,
+      sessionId: this.connectionSession.sessionId,
+      uptime: this.connectionSession.phase === ConnectionPhase.CONNECTED
+        ? now - this.connectionSession.startTime
+        : 0,
+      sessions: this.getConnectionState(),
+      lastDisconnectTime: this.connectionSession.lastDisconnectTime,
+      isReconnecting: this.connectionSession.phase === ConnectionPhase.RECONNECTING
+    };
   }
 }

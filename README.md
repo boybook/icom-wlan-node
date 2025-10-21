@@ -106,81 +106,175 @@ await rig.setPtt(false);
   - `civFrame(Buffer)` — one complete CI‑V frame (FE FE ... FD)
   - `audio({ pcm16: Buffer })` — audio frames
   - `error(Error)` — UDP errors
+  - `connectionLost(ConnectionLostInfo)` — session timeout detected
+  - `connectionRestored(ConnectionRestoredInfo)` — reconnected successfully
+  - `reconnectAttempting(ReconnectAttemptInfo)` — reconnect attempt started
+  - `reconnectFailed(ReconnectFailedInfo)` — reconnect attempt failed
 - Methods
   - `connect()` / `disconnect()` — connects control + CIV + audio sub‑sessions; resolves when all ready
   - `sendCiv(buf: Buffer)` — send a raw CI‑V frame
   - `setPtt(on: boolean)` — key/unkey; also manages TX meter polling and audio tailing
   - `sendAudioFloat32(samples: Float32Array, addLeadingBuffer?: boolean)` / `sendAudioPcm16(samples: Int16Array)`
+  - `getConnectionPhase()` — returns current ConnectionPhase (IDLE, CONNECTING, CONNECTED, DISCONNECTING, RECONNECTING)
+  - `getConnectionMetrics()` — returns detailed ConnectionMetrics (phase, uptime, session states, etc.)
+  - `getConnectionState()` — returns per‑session ConnectionState (control, civ, audio)
+  - `isAnySessionDisconnected()` — returns true if any session is disconnected
+  - `configureMonitoring(config)` — configure connection monitoring and auto‑reconnect behavior
 
-### Connection Monitoring (New!)
+### Connection Management & Auto-Reconnect
 
-The library now provides robust connection monitoring to detect and notify about connection issues:
+The library features a robust state machine for connection lifecycle management with automatic reconnection support.
+
+#### Connection State Machine
 
 ```ts
-// Listen for connection loss events
+ConnectionPhase: IDLE → CONNECTING → CONNECTED → DISCONNECTING
+                   ↓                      ↓
+                RECONNECTING ←────────────┘
+```
+
+#### Basic Usage
+
+```ts
+// Connect (idempotent - safe to call multiple times)
+await rig.connect();
+
+// Query connection phase
+const phase = rig.getConnectionPhase(); // 'IDLE' | 'CONNECTING' | 'CONNECTED' | ...
+
+// Get detailed metrics
+const metrics = rig.getConnectionMetrics();
+console.log(metrics.phase);       // Current phase
+console.log(metrics.uptime);      // Milliseconds since connected
+console.log(metrics.sessions);    // Per-session states {control, civ, audio}
+
+// Disconnect (also idempotent)
+await rig.disconnect();
+```
+
+#### Connection Monitoring Events
+
+```ts
+// Connection lost (any session timeout)
 rig.events.on('connectionLost', (info) => {
-  console.error(`Connection lost: ${info.sessionType} session`);
-  console.error(`Time since last data: ${info.timeSinceLastData}ms`);
-  // Handle disconnection (stop transmission, notify user, attempt reconnect, etc.)
+  console.error(`Lost: ${info.sessionType}, idle: ${info.timeSinceLastData}ms`);
 });
 
-// Listen for connection restored events
+// Connection restored after reconnect
 rig.events.on('connectionRestored', (info) => {
-  console.log(`Connection restored: ${info.sessionType} session`);
-  console.log(`Was down for: ${info.downtime}ms`);
+  console.log(`Restored after ${info.downtime}ms downtime`);
 });
 
-// Query current connection state
-const state = rig.getConnectionState();
-console.log(state.control);  // 'CONNECTED' or 'DISCONNECTED'
-console.log(state.civ);
-console.log(state.audio);
+// Reconnect attempt started
+rig.events.on('reconnectAttempting', (info) => {
+  console.log(`Reconnect attempt #${info.attemptNumber}, delay: ${info.delay}ms`);
+});
 
-// Check if any session is disconnected
-if (rig.isAnySessionDisconnected()) {
-  console.warn('At least one session is down!');
-}
-
-// Configure monitoring (optional)
-rig.configureMonitoring({
-  timeout: 10000,       // Timeout threshold: 10s (default 5s)
-  checkInterval: 2000   // Check interval: 2s (default 1s)
+// Reconnect attempt failed
+rig.events.on('reconnectFailed', (info) => {
+  console.error(`Attempt #${info.attemptNumber} failed: ${info.error}`);
+  if (!info.willRetry) console.error('Giving up - max retries reached');
 });
 ```
 
-**Features:**
-- **Passive monitoring**: Detects timeout when no data received within threshold
-- **Active keep-alive**: CIV watchdog sends OpenClose commands to maintain connection
-- **Event-driven**: Application notified immediately when connection state changes
-- **Per-session tracking**: Monitors Control, CIV, and Audio sessions independently
+#### Auto-Reconnect Configuration
 
-See `docs/CONNECTION_MONITORING.md` for detailed documentation and examples.
+```ts
+rig.configureMonitoring({
+  timeout: 8000,              // Session timeout: 8s (default: 5s)
+  checkInterval: 1000,        // Check every 1s (default: 1s)
+  autoReconnect: true,        // Enable auto-reconnect (default: false)
+  maxReconnectAttempts: 10,   // Max retries (default: undefined = infinite)
+  reconnectBaseDelay: 2000,   // Base delay: 2s (default: 2s)
+  reconnectMaxDelay: 30000    // Max delay: 30s (default: 30s, uses exponential backoff)
+});
+```
+
+**Exponential Backoff**: Delays are `baseDelay × 2^(attempt-1)`, capped at `maxDelay`.
+Example: 2s → 4s → 8s → 16s → 30s (capped) → 30s ...
+
+#### Error Handling
+
+**Common Errors**:
+
+```ts
+try {
+  await rig.connect();
+} catch (err) {
+  if (err.message.includes('timeout')) {
+    // Connection timeout (no response from radio)
+  } else if (err.message.includes('Login failed')) {
+    // Authentication error (check userName/password)
+  } else if (err.message.includes('Radio reported connected=false')) {
+    // Radio rejected connection (may be busy with another client)
+  } else if (err.message.includes('Cannot connect while disconnecting')) {
+    // Invalid state transition (wait for disconnect to complete)
+  }
+}
+
+// Listen for UDP errors
+rig.events.on('error', (err) => {
+  console.error('UDP error:', err.message);
+  // Network issues, invalid packets, etc.
+});
+```
+
+**Connection States to Handle**:
+- **CONNECTING**: Wait or show "connecting..." UI
+- **CONNECTED**: Normal operation
+- **RECONNECTING**: Show "reconnecting..." UI, disable TX
+- **DISCONNECTING**: Cleanup in progress
+- **IDLE**: Not connected
 
 ### High‑Level API
 
 The library exposes common CI‑V operations as friendly methods. Addresses are handled internally (`ctrAddr=0xe0`, `rigAddr` discovered via capabilities).
 
-- `setFrequency(hz: number)`
-- `setMode(mode: IcomMode | number, { dataMode?: boolean })`
-- `setPtt(on: boolean)`
+#### Rig Control
+
+- `setFrequency(hz: number)` — Set operating frequency in Hz
+- `setMode(mode: IcomMode | number, options?: { dataMode?: boolean })` — Set mode (supports string or numeric code)
+- `setPtt(on: boolean)` — Key/unkey transmitter
+
+**Supported Modes** (IcomMode string constants):
+- `'LSB'`, `'USB'`, `'AM'`, `'CW'`, `'RTTY'`, `'FM'`, `'WFM'`, `'CW_R'`, `'RTTY_R'`, `'DV'`
+- Or use numeric codes: `0x00` (LSB), `0x01` (USB), `0x02` (AM), etc.
+
+#### Rig Query
+
 - `readOperatingFrequency(options?: QueryOptions) => Promise<number|null>`
 - `readOperatingMode(options?: QueryOptions) => Promise<{ mode: number; filter?: number; modeName?: string; filterName?: string } | null>`
 - `readTransmitFrequency(options?: QueryOptions) => Promise<number|null>`
 - `readTransceiverState(options?: QueryOptions) => Promise<'TX' | 'RX' | 'UNKNOWN' | null>`
 - `readBandEdges(options?: QueryOptions) => Promise<Buffer|null>`
+
+#### Meters & Levels
+
 - `readSWR(options?: QueryOptions) => Promise<{ raw: number; swr: number; alert: boolean } | null>`
 - `readALC(options?: QueryOptions) => Promise<{ raw: number; percent: number; alert: boolean } | null>`
 - `getConnectorWLanLevel(options?: QueryOptions) => Promise<{ raw: number; percent: number } | null>`
 - `getLevelMeter(options?: QueryOptions) => Promise<{ raw: number; percent: number } | null>`
-- `setConnectorWLanLevel(level: number)`
-- `setConnectorDataMode(mode: ConnectorDataMode | number)`
+- `setConnectorWLanLevel(level: number)` — Set WLAN audio level (0-255)
 
-Examples:
+#### Connector Settings
+
+- `setConnectorDataMode(mode: ConnectorDataMode | number)` — Set data routing mode (supports string or numeric)
+
+**Supported Connector Modes** (ConnectorDataMode string constants):
+- `'MIC'` (0x00), `'ACC'` (0x01), `'USB'` (0x02), `'WLAN'` (0x03)
+
+#### Examples
 
 ```ts
-// Set frequency and mode (USB-D)
+// Set frequency and mode using string constants
 await rig.setFrequency(14074000);
-await rig.setMode(0x01, { dataMode: true }); // USB=0x01, data mode
+await rig.setMode('USB', { dataMode: true }); // USB-D for FT8
+
+// Or use numeric codes
+await rig.setMode(0x01, { dataMode: true }); // USB=0x01
+
+// Set LSB mode
+await rig.setMode('LSB');
 
 // Query current frequency (Hz)
 const hz = await rig.readOperatingFrequency({ timeout: 3000 });
@@ -200,12 +294,15 @@ await rig.setPtt(false);
 const swr = await rig.readSWR({ timeout: 2000 });
 const alc = await rig.readALC({ timeout: 2000 });
 const wlanLevel = await rig.getConnectorWLanLevel({ timeout: 2000 });
-const level = await rig.getLevelMeter({ timeout: 1500 });
-await rig.setConnectorWLanLevel(0x0120);
-await rig.setConnectorDataMode(0x01); // e.g., DATA
 
-if (level) {
-  console.log(`Generic Level Meter: raw=${level.raw} (${level.percent.toFixed(1)}%)`);
+// Set connector to WLAN mode using string constant
+await rig.setConnectorDataMode('WLAN');
+// Or numeric: await rig.setConnectorDataMode(0x03);
+
+await rig.setConnectorWLanLevel(120); // Set WLAN audio level
+
+if (wlanLevel) {
+  console.log(`WLAN Level: ${wlanLevel.percent.toFixed(1)}%`);
 }
 ```
 

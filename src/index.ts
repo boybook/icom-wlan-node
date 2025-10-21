@@ -1,4 +1,4 @@
-// Export types
+// Export types (includes ConnectionPhase, ConnectionMetrics, etc.)
 export * from './types';
 
 // Export main class

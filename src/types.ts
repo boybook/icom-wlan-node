@@ -214,6 +214,60 @@ export enum ConnectionState {
 }
 
 /**
+ * Connection phase state machine
+ * Represents the high-level connection lifecycle state
+ */
+export enum ConnectionPhase {
+  /** Initial state or fully disconnected */
+  IDLE = 'IDLE',
+  /** Establishing connection (AreYouThere, Login, sub-sessions) */
+  CONNECTING = 'CONNECTING',
+  /** All sessions established and ready */
+  CONNECTED = 'CONNECTED',
+  /** Actively disconnecting */
+  DISCONNECTING = 'DISCONNECTING',
+  /** Attempting to reconnect after connection loss */
+  RECONNECTING = 'RECONNECTING'
+}
+
+/**
+ * Connection session tracking information
+ * Used to prevent race conditions and track connection lifecycle
+ */
+export interface ConnectionSession {
+  /** Current connection phase */
+  phase: ConnectionPhase;
+  /** Unique session ID to prevent race conditions */
+  sessionId: number;
+  /** When this connection session started */
+  startTime: number;
+  /** When the connection was last lost (for downtime calculation) */
+  lastDisconnectTime?: number;
+}
+
+/**
+ * Connection metrics for observability
+ */
+export interface ConnectionMetrics {
+  /** Current connection phase */
+  phase: ConnectionPhase;
+  /** Current session ID */
+  sessionId: number;
+  /** Total uptime in milliseconds (since last successful connect) */
+  uptime: number;
+  /** Individual session states */
+  sessions: {
+    control: ConnectionState;
+    civ: ConnectionState;
+    audio: ConnectionState;
+  };
+  /** Last disconnect timestamp (if any) */
+  lastDisconnectTime?: number;
+  /** Whether currently reconnecting */
+  isReconnecting: boolean;
+}
+
+/**
  * UDP session type identifier
  */
 export enum SessionType {
