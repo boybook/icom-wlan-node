@@ -1,4 +1,123 @@
-# ICOM WLAN TypeScript 实现注意事项
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## 常用命令
+
+### 构建和开发
+```bash
+npm run build          # 编译 TypeScript 到 dist/
+npm run clean          # 清理 dist/ 目录
+npm run lint           # 运行 ESLint
+```
+
+### 测试
+```bash
+npm test                                    # 运行所有测试
+npm test -- __tests__/packets.test.ts       # 运行特定测试文件
+npm test -- --verbose                       # 详细输出
+
+# 针对真实设备的集成测试（需要环境变量）
+ICOM_IP=192.168.31.253 \
+ICOM_PORT=50001 \
+ICOM_USER=icom \
+ICOM_PASS=icomicom \
+npm test
+```
+
+## 核心架构
+
+### 三层设计
+
+1. **传输层** (`src/transport/`)
+   - `UdpClient.ts` - 封装 Node.js dgram 套接字
+
+2. **核心协议层** (`src/core/`)
+   - `IcomPackets.ts` - 所有数据包的构建和解析（控制、登录、令牌、CIV、音频等）
+   - `Session.ts` - UDP 会话管理，处理序列号、重传历史、心跳
+
+3. **设备控制层** (`src/rig/`)
+   - `IcomControl.ts` - **主入口类**，协调所有子会话，提供高级 API
+   - `IcomCiv.ts` - CI-V 子会话处理
+   - `IcomAudio.ts` - 音频收发处理
+   - `IcomRigCommands.ts` - CI-V 命令构建器
+   - `IcomConstants.ts` - 常数和模式映射
+
+### 多会话架构（关键设计）
+
+**IcomControl 协调三个独立的 UDP 会话**：
+
+1. **Control 会话**（端口 50001，默认）
+   - 处理初始握手（AreYouThere/AreYouReady）
+   - 登录认证（0x80/0x60）
+   - 令牌管理（0x40）
+   - 获取连接信息（0x90/0x50）
+
+2. **CIV 会话**（动态端口，从 Status 包获取）
+   - CI-V 命令传输
+   - 保持连接存活（OpenClose 心跳，500ms）
+
+3. **Audio 会话**（动态端口，从 Status 包获取）
+   - 音频流收发
+   - LPCM 16 位单声道 @ 12 kHz
+   - 20ms 帧（240 样本/帧）
+   - 使用精确定时器避免漂移
+
+**连接流程**：
+```
+connect() → AreYouThere → AreYouReady
+          → Login(0x80) → LoginResponse(0x60)
+          → ConnInfo(0x90) → Status(0x50，包含 CIV/Audio 端口)
+          → 建立 CIV 和 Audio 子会话
+```
+
+### 事件驱动模型
+
+所有数据接收通过 `IcomControl.events` 发出：
+- `login` - 登录结果
+- `status` - 状态信息（端口号等）
+- `capabilities` - 设备能力（CIV 地址、音频名称）
+- `civ` / `civFrame` - CI-V 数据
+- `audio` - 音频帧
+- `error` - UDP 错误
+
+## 关键文件说明
+
+### IcomControl.ts (~600 行)
+**这是用户代码的主要入口点**。职责：
+- 管理连接生命周期
+- 协调三个 UDP 会话
+- 分发事件给用户代码
+- 提供高级 API（`setFrequency`, `setMode`, `setPtt`, `readOperatingFrequency` 等）
+
+**修改时注意**：需要理解三个会话的交互时序。
+
+### Session.ts (~200 行)
+**UDP 会话的核心实现**。每个会话实例追踪：
+- 本地/远程 ID 和序列号
+- 发送历史（用于重传）
+- 心跳和保活机制
+
+**修改时注意**：序列号管理必须正确，否则设备会拒绝数据包。
+
+### IcomPackets.ts (~420 行)
+**定义所有数据包格式**。包含：
+- 各种包的静态构建方法
+- 字节序处理（混合使用 BE 和 LE）
+- 预定义的包大小常数
+
+**修改时注意**：必须使用 `codec.ts` 中的 `be16/be32/le16/le32` 函数。
+
+### codec.ts (~60 行)
+**字节序处理工具库**。提供：
+- `be16/be32` - Big-Endian 读写
+- `le16/le32` - Little-Endian 读写
+- `intToBytesBE/LE` - 整数转字节数组
+- `hex()` - Buffer 转十六进制字符串（调试用）
+
+**强制使用规则**：所有数据包字段的读写必须通过这些函数，不得直接使用 `Buffer.readUInt16BE/LE()` 等方法。
+
+---
 
 ## ⚠️ 重要：Java原始代码字节序命名陷阱
 

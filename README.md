@@ -112,6 +112,50 @@ await rig.setPtt(false);
   - `setPtt(on: boolean)` — key/unkey; also manages TX meter polling and audio tailing
   - `sendAudioFloat32(samples: Float32Array, addLeadingBuffer?: boolean)` / `sendAudioPcm16(samples: Int16Array)`
 
+### Connection Monitoring (New!)
+
+The library now provides robust connection monitoring to detect and notify about connection issues:
+
+```ts
+// Listen for connection loss events
+rig.events.on('connectionLost', (info) => {
+  console.error(`Connection lost: ${info.sessionType} session`);
+  console.error(`Time since last data: ${info.timeSinceLastData}ms`);
+  // Handle disconnection (stop transmission, notify user, attempt reconnect, etc.)
+});
+
+// Listen for connection restored events
+rig.events.on('connectionRestored', (info) => {
+  console.log(`Connection restored: ${info.sessionType} session`);
+  console.log(`Was down for: ${info.downtime}ms`);
+});
+
+// Query current connection state
+const state = rig.getConnectionState();
+console.log(state.control);  // 'CONNECTED' or 'DISCONNECTED'
+console.log(state.civ);
+console.log(state.audio);
+
+// Check if any session is disconnected
+if (rig.isAnySessionDisconnected()) {
+  console.warn('At least one session is down!');
+}
+
+// Configure monitoring (optional)
+rig.configureMonitoring({
+  timeout: 10000,       // Timeout threshold: 10s (default 5s)
+  checkInterval: 2000   // Check interval: 2s (default 1s)
+});
+```
+
+**Features:**
+- **Passive monitoring**: Detects timeout when no data received within threshold
+- **Active keep-alive**: CIV watchdog sends OpenClose commands to maintain connection
+- **Event-driven**: Application notified immediately when connection state changes
+- **Per-session tracking**: Monitors Control, CIV, and Audio sessions independently
+
+See `docs/CONNECTION_MONITORING.md` for detailed documentation and examples.
+
 ### High‑Level API
 
 The library exposes common CI‑V operations as friendly methods. Addresses are handled internally (`ctrAddr=0xe0`, `rigAddr` discovered via capabilities).

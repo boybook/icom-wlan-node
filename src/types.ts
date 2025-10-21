@@ -49,6 +49,11 @@ export interface IcomRigEvents {
   civFrame: (frame: Buffer) => void;
   audio: (frame: AudioFrame) => void;
   error: (err: Error) => void;
+  // Connection monitoring events
+  connectionLost: (info: ConnectionLostInfo) => void;
+  connectionRestored: (info: ConnectionRestoredInfo) => void;
+  reconnectAttempting: (info: ReconnectAttemptInfo) => void;
+  reconnectFailed: (info: ReconnectFailedInfo) => void;
 }
 
 export interface Disposable {
@@ -189,4 +194,140 @@ export interface LevelMeterReading {
   raw: number;
   /** Percentage (0-100%) */
   percent: number;
+}
+
+// ============================================================================
+// Connection Monitoring Types
+// ============================================================================
+
+/**
+ * Connection state enumeration
+ * Represents the current state of a UDP session
+ */
+export enum ConnectionState {
+  /** Connection is active and receiving data */
+  CONNECTED = 'CONNECTED',
+  /** Connection has been lost (timeout detected) */
+  DISCONNECTED = 'DISCONNECTED',
+  /** Attempting to restore connection */
+  RECONNECTING = 'RECONNECTING'
+}
+
+/**
+ * UDP session type identifier
+ */
+export enum SessionType {
+  /** Main control session (login, status, token management) */
+  CONTROL = 'CONTROL',
+  /** CI-V command session */
+  CIV = 'CIV',
+  /** Audio streaming session */
+  AUDIO = 'AUDIO'
+}
+
+/**
+ * Information about a connection loss event
+ */
+export interface ConnectionLostInfo {
+  /** Which session lost connection */
+  sessionType: SessionType;
+  /** Reason for disconnection */
+  reason: string;
+  /** Time since last received data (ms) */
+  timeSinceLastData: number;
+  /** Timestamp when the event occurred */
+  timestamp: number;
+}
+
+/**
+ * Information about a connection restored event
+ */
+export interface ConnectionRestoredInfo {
+  /** Which session was restored */
+  sessionType: SessionType;
+  /** How long the connection was down (ms) */
+  downtime: number;
+  /** Timestamp when the connection was restored */
+  timestamp: number;
+}
+
+/**
+ * Information about a reconnection attempt
+ */
+export interface ReconnectAttemptInfo {
+  /** Which session is attempting to reconnect */
+  sessionType: SessionType;
+  /** Current attempt number (1-based) */
+  attemptNumber: number;
+  /** Delay before this attempt (ms) */
+  delay: number;
+  /** Timestamp of this attempt */
+  timestamp: number;
+  /** Whether this is a full reconnect (all sessions) */
+  fullReconnect: boolean;
+}
+
+/**
+ * Information about a failed reconnection attempt
+ */
+export interface ReconnectFailedInfo {
+  /** Which session failed to reconnect */
+  sessionType: SessionType;
+  /** Attempt number that failed */
+  attemptNumber: number;
+  /** Error that caused the failure */
+  error: string;
+  /** Timestamp of the failure */
+  timestamp: number;
+  /** Whether this was a full reconnect attempt */
+  fullReconnect: boolean;
+  /** Whether we will retry */
+  willRetry: boolean;
+  /** Next retry delay (ms), if retrying */
+  nextRetryDelay?: number;
+}
+
+/**
+ * Configuration for connection monitoring
+ */
+export interface ConnectionMonitorConfig {
+  /**
+   * Timeout threshold in milliseconds
+   * If no data received within this period, connection is considered lost
+   * Default: 5000ms (5 seconds)
+   */
+  timeout?: number;
+
+  /**
+   * How often to check for timeout (ms)
+   * Default: 1000ms (1 second)
+   */
+  checkInterval?: number;
+
+  /**
+   * Enable automatic reconnection attempts
+   * Default: false
+   */
+  autoReconnect?: boolean;
+
+  /**
+   * Maximum number of reconnection attempts
+   * Set to undefined for infinite retries
+   * Default: undefined (infinite retries)
+   */
+  maxReconnectAttempts?: number;
+
+  /**
+   * Base delay between reconnection attempts (ms)
+   * Uses exponential backoff: attempt N uses delay * 2^(N-1)
+   * Default: 2000ms (2 seconds)
+   */
+  reconnectBaseDelay?: number;
+
+  /**
+   * Maximum delay between reconnection attempts (ms)
+   * Caps the exponential backoff
+   * Default: 30000ms (30 seconds)
+   */
+  reconnectMaxDelay?: number;
 }

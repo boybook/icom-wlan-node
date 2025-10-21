@@ -13,9 +13,14 @@ export class IcomCiv {
 
   start() {
     this.stop();
-    // keep-alive open/close
+    // CIV session watchdog: Keep-alive mechanism to maintain CIV connection
+    // Matches FT8CN's startCivDataTimer() implementation:
+    // - Checks every 500ms if CIV session is receiving data
+    // - If no data received for >2000ms, sends OpenClose(true) to re-establish connection
+    // - This prevents silent disconnection where radio stops responding without error
     this.openTimer = setInterval(() => {
       if (Date.now() - this.sess.lastReceivedTime > 2000) {
+        dbg('CIV watchdog: No data for >2s, sending OpenClose to keep alive');
         this.sendOpenClose(true);
       }
     }, 500);

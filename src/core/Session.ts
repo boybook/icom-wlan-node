@@ -1,6 +1,7 @@
 import { UdpClient } from '../transport/UdpClient';
-import { dbgV } from '../utils/debug';
+import { dbg, dbgV } from '../utils/debug';
 import { Cmd, ControlPacket, PingPacket, TokenType } from './IcomPackets';
+import { SessionType, ConnectionMonitorConfig } from '../types';
 
 export interface SessionOptions {
   ip: string;
@@ -25,28 +26,36 @@ export class Session {
   public lastReceivedTime = Date.now();
 
   private address: SessionOptions;
+  private handlers: SessionHandlers;
   private txHistory = new Map<number, Buffer>();
   private areYouThereTimer?: NodeJS.Timeout;
   private pingTimer?: NodeJS.Timeout;
 
   private destroyed = false;
 
+  // Session type identifier (set by IcomControl)
+  public sessionType?: SessionType;
+
   constructor(address: SessionOptions, handlers: SessionHandlers) {
     this.address = address;
+    this.handlers = handlers;
     this.udp.on('data', (rinfo, data) => {
       if (this.destroyed) return;
       this.lastReceivedTime = Date.now();
+
       try {
-        // Peek type directly to avoid late requires during teardown
-        const t = data.length >= 6 ? data.readUInt16LE(4) : -1;
-        dbgV(`RX port=${this.localPort} from ${rinfo.address}:${rinfo.port} len=${data.length} type=${t >= 0 ? '0x'+t.toString(16) : 'n/a'}`);
+        const type = data.length >= 6 ? data.readUInt16LE(4) : -1;
+        dbgV(`RX port=${this.localPort} from ${rinfo.address}:${rinfo.port} len=${data.length} type=${type >= 0 ? '0x'+type.toString(16) : 'n/a'}`);
       } catch {}
       handlers.onData(data);
     });
     this.udp.on('error', handlers.onSendError);
   }
 
-  open() { this.udp.open(); }
+  open() {
+    this.destroyed = false;  // Reset destroyed flag to allow sending data after reconnection
+    this.udp.open();
+  }
   close() {
     this.stopTimers();
     this.destroyed = true;
@@ -89,8 +98,9 @@ export class Session {
 
   startAreYouThere() {
     this.stopAreYouThere();
+    dbg(`Starting AreYouThere timer for ${this.address.ip}:${this.address.port}`);
     this.areYouThereTimer = setInterval(() => {
-      dbgV(`AYT -> ${this.address.ip}:${this.address.port} localId=${this.localId}`);
+      dbg(`AYT -> ${this.address.ip}:${this.address.port} localId=${this.localId}`);
       this.sendUntracked(ControlPacket.toBytes(Cmd.ARE_YOU_THERE, 0, this.localId, 0));
     }, 500);
   }
@@ -108,5 +118,38 @@ export class Session {
 
   setRemote(ip: string, port: number) {
     this.address = { ip, port };
+  }
+
+
+  /**
+   * Reset session state to initial values
+   * Call this before reconnecting to ensure clean state
+   * (especially important after radio restart)
+   */
+  resetState() {
+    // Reset destroyed flag to ensure session is usable after state reset
+    this.destroyed = false;
+
+    // Generate new IDs
+    this.localId = Date.now() >>> 0;
+    this.remoteId = 0;
+
+    // Reset sequence numbers
+    this.trackedSeq = 1;
+    this.pingSeq = 0;
+    this.innerSeq = 0x30;
+
+    // Reset tokens
+    this.rigToken = 0;
+    this.localToken = (Date.now() & 0xffff) >>> 0;
+
+    // Reset timestamps
+    this.lastSentTime = Date.now();
+    this.lastReceivedTime = Date.now();
+
+    // Clear history
+    this.txHistory.clear();
+
+    dbgV(`Session state reset: localId=${this.localId}, localToken=${this.localToken}`);
   }
 }

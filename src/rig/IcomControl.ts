@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 import { CapCapabilitiesPacket, Cmd, ControlPacket, LoginPacket, LoginResponsePacket, RadioCapPacket, Sizes, StatusPacket, TokenPacket, TokenType, ConnInfoPacket, AUDIO_SAMPLE_RATE, XIEGU_TX_BUFFER_SIZE, PingPacket, CivPacket } from '../core/IcomPackets';
 import { dbg, dbgV } from '../utils/debug';
 import { Session } from '../core/Session';
-import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading } from '../types';
+import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo } from '../types';
 import { IcomCiv } from './IcomCiv';
 import { IcomAudio } from './IcomAudio';
 import { IcomRigCommands } from './IcomRigCommands';
@@ -23,47 +23,248 @@ export class IcomControl {
   private civAssembleBuf: Buffer = Buffer.alloc(0); // CIV stream reassembler
   private meterTimer?: NodeJS.Timeout;
 
-  // Connection readiness promises
-  private loginReady!: Promise<void>;
-  private civReady!: Promise<void>;
-  private audioReady!: Promise<void>;
-  private resolveLoginReady!: () => void;
-  private resolveCivReady!: () => void;
-  private resolveAudioReady!: () => void;
+  // Connection state
+  private connectPromise: Promise<void> | null = null;
+  private isFullReconnecting = false;
+  private abortConnection?: (reason: string) => void; // Fast-fail mechanism for connection attempts
+
+  // Unified connection monitoring
+  private monitorTimer?: NodeJS.Timeout;
+  private monitorConfig: ConnectionMonitorConfig & {
+    timeout: number;
+    checkInterval: number;
+    autoReconnect: boolean;
+    reconnectBaseDelay: number;
+    reconnectMaxDelay: number;
+  } = {
+    timeout: 5000,
+    checkInterval: 1000,
+    autoReconnect: false,
+    maxReconnectAttempts: undefined, // undefined = infinite retries
+    reconnectBaseDelay: 2000,
+    reconnectMaxDelay: 30000
+  };
 
   constructor(options: IcomRigOptions) {
     this.options = options;
+
+    // Setup control session
     this.sess = new Session({ ip: options.control.ip, port: options.control.port }, {
       onData: (data) => this.onData(data),
       onSendError: (e) => this.ev.emit('error', e)
     });
-    // Pre-open local CIV/Audio sessions to obtain local ports before 0x90
-    this.civSess = new Session({ ip: options.control.ip, port: 0 }, { onData: (b) => this.onCivData(b), onSendError: (e) => this.ev.emit('error', e) });
-    this.audioSess = new Session({ ip: options.control.ip, port: 0 }, { onData: (b) => this.onAudioData(b), onSendError: (e) => this.ev.emit('error', e) });
+    this.sess.sessionType = SessionType.CONTROL;
+
+    // Setup CIV session
+    this.civSess = new Session({ ip: options.control.ip, port: 0 }, {
+      onData: (b) => this.onCivData(b),
+      onSendError: (e) => this.ev.emit('error', e)
+    });
+    this.civSess.sessionType = SessionType.CIV;
     this.civSess.open();
+
+    // Setup audio session
+    this.audioSess = new Session({ ip: options.control.ip, port: 0 }, {
+      onData: (b) => this.onAudioData(b),
+      onSendError: (e) => this.ev.emit('error', e)
+    });
+    this.audioSess.sessionType = SessionType.AUDIO;
     this.audioSess.open();
+
     this.civ = new IcomCiv(this.civSess);
     this.audio = new IcomAudio(this.audioSess);
   }
 
   get events(): RigEventEmitter { return this.ev; }
 
+  /**
+   * Connect to the rig (idempotent - returns same promise if already connecting)
+   */
   async connect() {
-    // Initialize readiness promises
-    this.loginReady = new Promise<void>(resolve => { this.resolveLoginReady = resolve; });
-    this.civReady = new Promise<void>(resolve => { this.resolveCivReady = resolve; });
-    this.audioReady = new Promise<void>(resolve => { this.resolveAudioReady = resolve; });
+    // If already connecting, return the same promise
+    if (this.connectPromise) {
+      dbg('connect() called while already connecting - reusing existing promise');
+      return this.connectPromise;
+    }
 
-    this.sess.open();
-    this.sess.startAreYouThere();
+    this.connectPromise = this._doConnect()
+      .finally(() => { this.connectPromise = null; });
 
-    // Wait for all sub-sessions to be ready
-    await Promise.all([this.loginReady, this.civReady, this.audioReady]);
-    dbg('All sessions ready (login + civ + audio)');
+    return this.connectPromise;
+  }
+
+  /**
+   * Internal connection implementation
+   * Uses local promises to avoid race conditions
+   * Uses phased timeout: 30s for overall, 10s for sub-sessions after login
+   */
+  private async _doConnect() {
+    const { loginReady, civReady, audioReady, cleanup } = this.createReadyPromises();
+
+    try {
+      // Reset all session states to initial values
+      // This is CRITICAL for reconnection after radio restart
+      // Without this, the radio won't recognize our old localId/remoteId/tokens
+      dbg('Resetting all session states before connection...');
+      this.sess.resetState();
+      this.civSess.resetState();
+      this.audioSess.resetState();
+
+      // Ensure all session sockets are open (critical for reconnection after disconnect)
+      this.sess.open();
+      this.civSess.open();
+      this.audioSess.open();
+
+      this.sess.startAreYouThere();
+
+      // Phase 1: Wait for login (protected by overall 30s timeout from connectWithTimeout)
+      await loginReady;
+      dbg('Login complete, waiting for CIV/Audio sub-sessions...');
+
+      // Phase 2: Wait for CIV/Audio with shorter timeout (10s)
+      // If radio doesn't respond to AreYouThere, fail fast instead of waiting full 30s
+      const SUB_SESSION_TIMEOUT = 10000;
+      const subSessionTimeout = new Promise<void>((_, reject) => {
+        setTimeout(() => {
+          reject(new Error(`CIV/Audio sessions timeout after ${SUB_SESSION_TIMEOUT}ms - radio not responding to AreYouThere`));
+        }, SUB_SESSION_TIMEOUT);
+      });
+
+      await Promise.race([
+        Promise.all([civReady, audioReady]),
+        subSessionTimeout
+      ]);
+
+      dbg('All sessions ready (login + civ + audio)');
+
+      // Start unified connection monitoring
+      this.startUnifiedMonitoring();
+      dbg('Unified connection monitoring started');
+    } finally {
+      cleanup();
+    }
+  }
+
+  /**
+   * Create local promises for connection readiness
+   * This avoids race conditions with instance variables
+   */
+  private createReadyPromises() {
+    let resolveLogin: () => void;
+    let resolveCiv: () => void;
+    let resolveAudio: () => void;
+    let rejectLogin: (reason: Error) => void;
+    let rejectCiv: (reason: Error) => void;
+    let rejectAudio: (reason: Error) => void;
+
+    const loginReady = new Promise<void>((resolve, reject) => {
+      resolveLogin = resolve;
+      rejectLogin = reject;
+    });
+    const civReady = new Promise<void>((resolve, reject) => {
+      resolveCiv = resolve;
+      rejectCiv = reject;
+    });
+    const audioReady = new Promise<void>((resolve, reject) => {
+      resolveAudio = resolve;
+      rejectAudio = reject;
+    });
+
+    // Store abort handler to allow external cancellation
+    this.abortConnection = (reason: string) => {
+      dbg(`Aborting connection: ${reason}`);
+      const error = new Error(reason);
+      rejectLogin(error);
+      rejectCiv(error);
+      rejectAudio(error);
+    };
+
+    // Temporary event listeners (local scope)
+    const onLogin = (res: LoginResult) => {
+      if (res.ok) {
+        dbg('Login ready - resolving local loginReady promise');
+        resolveLogin();
+      }
+    };
+    const onCivReady = () => {
+      dbg('CIV ready - resolving local civReady promise');
+      resolveCiv();
+    };
+    const onAudioReady = () => {
+      dbg('Audio ready - resolving local audioReady promise');
+      resolveAudio();
+    };
+
+    this.ev.once('login', onLogin);
+    this.ev.once('_civReady', onCivReady);
+    this.ev.once('_audioReady', onAudioReady);
+
+    return {
+      loginReady,
+      civReady,
+      audioReady,
+      cleanup: () => {
+        this.abortConnection = undefined; // Clear abort handler
+        this.ev.off('login', onLogin);
+        this.ev.off('_civReady', onCivReady);
+        this.ev.off('_audioReady', onAudioReady);
+      }
+    };
+  }
+
+  /**
+   * Start unified connection monitoring
+   * Monitors all three sessions from a single timer to avoid race conditions
+   * @private
+   */
+  private startUnifiedMonitoring() {
+    this.stopUnifiedMonitoring();
+
+    this.monitorTimer = setInterval(() => {
+      // Skip checking if currently reconnecting
+      if (this.isFullReconnecting) return;
+
+      const now = Date.now();
+      const sessions = [
+        { sess: this.sess, type: SessionType.CONTROL },
+        { sess: this.civSess, type: SessionType.CIV },
+        { sess: this.audioSess, type: SessionType.AUDIO }
+      ];
+
+      // Check each session for timeout
+      for (const { sess, type } of sessions) {
+        if (sess['destroyed']) continue; // Skip destroyed sessions
+
+        const timeSinceLastData = now - sess.lastReceivedTime;
+        if (timeSinceLastData > this.monitorConfig.timeout) {
+          dbg(`${type} session timeout detected (${timeSinceLastData}ms since last data)`);
+          this.handleConnectionLost(type, timeSinceLastData);
+          return; // Only handle one timeout at a time to avoid duplicate reconnect triggers
+        }
+      }
+    }, this.monitorConfig.checkInterval);
+  }
+
+  /**
+   * Stop unified connection monitoring
+   * @private
+   */
+  private stopUnifiedMonitoring() {
+    if (this.monitorTimer) {
+      clearInterval(this.monitorTimer);
+      this.monitorTimer = undefined;
+    }
   }
 
   async disconnect() {
+    // 0. Cancel any ongoing connection attempts
+    if (this.connectPromise) {
+      dbg('Cancelling ongoing connection...');
+      this.connectPromise = null;
+    }
+
     // 1. Stop all timers first to prevent interference
+    this.stopUnifiedMonitoring(); // Stop unified monitoring
     if (this.tokenTimer) { clearInterval(this.tokenTimer); this.tokenTimer = undefined; }
     this.stopMeterPolling();
     this.sess.stopTimers();
@@ -571,10 +772,45 @@ export class IcomControl {
       case Sizes.STATUS: {
         const civPort = StatusPacket.getRigCivPort(buf);
         const audioPort = StatusPacket.getRigAudioPort(buf);
-        dbg('STATUS <= civPort=', civPort, 'audioPort=', audioPort, 'authOK=', StatusPacket.authOK(buf), 'connected=', StatusPacket.getIsConnected(buf));
+        const connected = StatusPacket.getIsConnected(buf);
+        const authOK = StatusPacket.authOK(buf);
+        dbg('STATUS <= civPort=', civPort, 'audioPort=', audioPort, 'authOK=', authOK, 'connected=', connected);
+
+        // If radio reports disconnected, handle immediately
+        if (!connected) {
+          dbg('Radio reported connected=false');
+
+          // If we're currently attempting to connect, abort immediately (fast-fail)
+          if (this.connectPromise && this.abortConnection) {
+            dbg('Aborting ongoing connection attempt due to connected=false');
+            this.abortConnection('Radio reported connected=false');
+          } else {
+            // Otherwise, trigger reconnection for established connection
+            dbg('Triggering reconnection for established connection');
+            this.handleConnectionLost(SessionType.CONTROL, 0);
+          }
+          break;
+        }
+
+        // CRITICAL: Ignore STATUS packets with invalid ports (0)
+        // Radio sends multiple STATUS packets during connection:
+        //   1. First with valid ports (e.g., 50002, 50003) when CONNINFO busy=false
+        //   2. Second with port=0 when CONNINFO busy=true (should be ignored!)
+        // If we don't check, the second packet will overwrite the valid ports with 0
+        if (civPort === 0 || audioPort === 0) {
+          dbg('STATUS packet has invalid ports (0) - ignoring to preserve existing valid ports');
+          dbg('This is normal during reconnection when rig sends CONNINFO busy=true');
+          // Still emit status event for monitoring, but don't setRemote
+          const info: StatusInfo = { civPort, audioPort, authOK, connected };
+          this.ev.emit('status', info);
+          break;
+        }
+
         const info: StatusInfo = { civPort, audioPort, authOK: true, connected: true };
         this.ev.emit('status', info);
-        // set remote ports and start AYT for civ/audio
+
+        // Only set remote ports and start sessions if ports are valid (non-zero)
+        dbg('STATUS has valid ports - setting up CIV/Audio sessions');
         if (this.civSess) { this.civSess.setRemote(this.options.control.ip, civPort); this.civSess.startAreYouThere(); this.civ.start(); }
         if (this.audioSess) { this.audioSess.setRemote(this.options.control.ip, audioPort); this.audioSess.startAreYouThere(); }
         break;
@@ -600,10 +836,7 @@ export class IcomControl {
         }
         const res: LoginResult = { ok, errorCode: LoginResponsePacket.errorNum(buf), connection: LoginResponsePacket.getConnection(buf) };
         this.ev.emit('login', res);
-        if (ok) {
-          dbg('Login ready - resolving loginReady promise');
-          this.resolveLoginReady();
-        }
+        // Note: login event is caught by createReadyPromises() listener
         break;
       }
       case Sizes.CAP_CAP: {
@@ -623,25 +856,32 @@ export class IcomControl {
       }
       case Sizes.CONNINFO: {
         // rig sends twice; first time busy=false, reply with our ports
+        // IMPORTANT: During reconnection, rig may send busy=true if old connection not fully cleaned up
+        // We MUST still reply to proceed with connection (otherwise STATUS packet will never arrive)
         const busy = ConnInfoPacket.getBusy(buf);
         this.macAddress = ConnInfoPacket.getMacAddress(buf);
         this.rigName = ConnInfoPacket.getRigName(buf);
         dbg('CONNINFO <= busy=', busy, 'rigName=', this.rigName);
-        if (!busy) {
-          const reply = ConnInfoPacket.connInfoPacketData(
-            buf, 0, this.sess.localId, this.sess.remoteId, 0x01, 0x03, this.sess.innerSeq, this.sess.localToken, this.sess.rigToken,
-            this.rigName, this.options.userName, AUDIO_SAMPLE_RATE, AUDIO_SAMPLE_RATE, this.civSess.localPort, this.audioSess.localPort, XIEGU_TX_BUFFER_SIZE
-          );
-          this.sess.innerSeq = (this.sess.innerSeq + 1) & 0xffff;
-          this.sess.sendTracked(reply);
-          try {
-            // eslint-disable-next-line @typescript-eslint/no-var-requires
-            const { hex } = require('../utils/codec');
-            dbg('CONNINFO -> reply with local civPort=', this.civSess.localPort, 'audioPort=', this.audioSess.localPort);
-            dbgV('CONNINFO reply hex (first 0x60):', hex(Buffer.from(reply.subarray(0, 0x60))));
-            dbgV('CONNINFO reply hex (0x60..0x90):', hex(Buffer.from(reply.subarray(0x60, 0x90))));
-          } catch {}
+
+        if (busy) {
+          dbg('CONNINFO busy=true detected - likely reconnecting while rig still has old session');
+          dbg('Sending ConnInfo reply anyway to allow STATUS packet delivery');
         }
+
+        // ALWAYS send reply (even when busy=true during reconnection)
+        const reply = ConnInfoPacket.connInfoPacketData(
+          buf, 0, this.sess.localId, this.sess.remoteId, 0x01, 0x03, this.sess.innerSeq, this.sess.localToken, this.sess.rigToken,
+          this.rigName, this.options.userName, AUDIO_SAMPLE_RATE, AUDIO_SAMPLE_RATE, this.civSess.localPort, this.audioSess.localPort, XIEGU_TX_BUFFER_SIZE
+        );
+        this.sess.innerSeq = (this.sess.innerSeq + 1) & 0xffff;
+        this.sess.sendTracked(reply);
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          const { hex } = require('../utils/codec');
+          dbg('CONNINFO -> reply with local civPort=', this.civSess.localPort, 'audioPort=', this.audioSess.localPort);
+          dbgV('CONNINFO reply hex (first 0x60):', hex(Buffer.from(reply.subarray(0, 0x60))));
+          dbgV('CONNINFO reply hex (0x60..0x90):', hex(Buffer.from(reply.subarray(0x60, 0x90))));
+        } catch {}
         break;
       }
       default: {
@@ -704,8 +944,8 @@ export class IcomControl {
       if (type === Cmd.I_AM_READY) {
         this.civ.sendOpenClose(true);
         this.civSess.startIdle();
-        dbg('CIV ready - resolving civReady promise');
-        this.resolveCivReady();
+        dbg('CIV ready - emitting internal _civReady event');
+        this.ev.emit('_civReady' as any);
         return;
       }
     }
@@ -848,8 +1088,8 @@ export class IcomControl {
         // Start continuous audio transmission (like Java's startTxAudio on I_AM_READY)
         this.audio.start();
         this.audioSess.startIdle();
-        dbg('Audio ready - started continuous audio stream, resolving audioReady promise');
-        this.resolveAudioReady();
+        dbg('Audio ready - started continuous audio stream, emitting internal _audioReady event');
+        this.ev.emit('_audioReady' as any);
         return;
       }
     }
@@ -886,5 +1126,195 @@ export class IcomControl {
       AUDIO_SAMPLE_RATE, this.civSess.localPort, this.audioSess.localPort, XIEGU_TX_BUFFER_SIZE);
     this.sess.innerSeq = (this.sess.innerSeq + 1) & 0xffff;
     this.sess.sendTracked(pkt);
+  }
+
+  // ============================================================================
+  // Connection Monitoring
+  // ============================================================================
+
+  /**
+   * Configure unified connection monitoring
+   * @param config - Monitoring configuration options
+   * @example
+   * rig.configureMonitoring({ timeout: 10000, checkInterval: 2000, autoReconnect: true });
+   */
+  configureMonitoring(config: ConnectionMonitorConfig) {
+    this.monitorConfig = { ...this.monitorConfig, ...config };
+  }
+
+  /**
+   * Get current connection state for all sessions
+   * @returns Object with connection state for each session
+   */
+  getConnectionState(): { control: ConnectionState; civ: ConnectionState; audio: ConnectionState } {
+    const now = Date.now();
+    const isTimedOut = (sess: Session) => {
+      if (sess['destroyed']) return true;
+      return (now - sess.lastReceivedTime) > this.monitorConfig.timeout;
+    };
+
+    return {
+      control: isTimedOut(this.sess) ? ConnectionState.DISCONNECTED : ConnectionState.CONNECTED,
+      civ: isTimedOut(this.civSess) ? ConnectionState.DISCONNECTED : ConnectionState.CONNECTED,
+      audio: isTimedOut(this.audioSess) ? ConnectionState.DISCONNECTED : ConnectionState.CONNECTED
+    };
+  }
+
+  /**
+   * Check if any session has lost connection
+   * @returns true if any session is disconnected
+   */
+  isAnySessionDisconnected(): boolean {
+    const state = this.getConnectionState();
+    return state.control === ConnectionState.DISCONNECTED ||
+           state.civ === ConnectionState.DISCONNECTED ||
+           state.audio === ConnectionState.DISCONNECTED;
+  }
+
+  /**
+   * Handle connection lost event from a session
+   * Simplified strategy: any session loss triggers full reconnect
+   * @private
+   */
+  private handleConnectionLost(sessionType: SessionType, timeSinceLastData: number) {
+    const info: ConnectionLostInfo = {
+      sessionType,
+      reason: `No data received for ${timeSinceLastData}ms`,
+      timeSinceLastData,
+      timestamp: Date.now()
+    };
+    dbg(`Connection lost: ${sessionType} session (${timeSinceLastData}ms since last data)`);
+    this.ev.emit('connectionLost', info);
+
+    // Check if auto-reconnect is enabled
+    if (!this.monitorConfig.autoReconnect) {
+      dbg(`Auto-reconnect disabled, not attempting reconnect`);
+      return;
+    }
+
+    // Simplified strategy: any session loss → full reconnect
+    // This is more reliable than trying to reconnect individual sessions
+    dbg(`${sessionType} session lost - initiating full reconnect`);
+    this.scheduleFullReconnect();
+  }
+
+  /**
+   * Schedule a full reconnection (all sessions)
+   * Uses simple while loop with exponential backoff
+   * @private
+   */
+  private async scheduleFullReconnect() {
+    if (this.isFullReconnecting) {
+      dbg('Full reconnect already in progress, skipping');
+      return;
+    }
+
+    this.isFullReconnecting = true;
+
+    let attempt = 0;
+
+    while (true) {
+      attempt++;
+      const delay = this.calculateReconnectDelay(attempt);
+
+      // Emit reconnect attempting event
+      this.ev.emit('reconnectAttempting', {
+        sessionType: SessionType.CONTROL,
+        attemptNumber: attempt,
+        delay,
+        timestamp: Date.now(),
+        fullReconnect: true
+      });
+
+      dbg(`Full reconnect attempt #${attempt} (delay: ${delay}ms)`);
+      await this.sleep(delay);
+
+      try {
+        // Disconnect all sessions
+        dbg('Full reconnect: disconnecting all sessions');
+        await this.disconnect();
+
+        // Wait longer before reconnecting to allow rig to fully clean up old connection
+        // This is critical - rig may report CONNINFO busy=true if we reconnect too quickly
+        dbg('Full reconnect: waiting 5s for rig to clean up old session...');
+        await this.sleep(5000);
+
+        // Reconnect with timeout
+        dbg('Full reconnect: reconnecting');
+        await this.connectWithTimeout(30000);
+
+        // Success!
+        dbg('Full reconnect successful!');
+        const finalState = this.getConnectionState();
+        dbg(`Reconnect complete - All sessions: Control=${finalState.control}, CIV=${finalState.civ}, Audio=${finalState.audio}`);
+        this.isFullReconnecting = false;
+        return;
+
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        dbg('Full reconnect failed:', errorMsg);
+
+        // Get current connection state for diagnostics
+        const state = this.getConnectionState();
+        dbg(`Current state after failed reconnect: Control=${state.control}, CIV=${state.civ}, Audio=${state.audio}`);
+
+        // Check if we should retry
+        const maxAttempts = this.monitorConfig.maxReconnectAttempts;
+        const willRetry = maxAttempts === undefined || attempt < maxAttempts;
+
+        // Emit reconnect failed event
+        this.ev.emit('reconnectFailed', {
+          sessionType: SessionType.CONTROL,
+          attemptNumber: attempt,
+          error: errorMsg,
+          timestamp: Date.now(),
+          fullReconnect: true,
+          willRetry,
+          nextRetryDelay: willRetry ? this.calculateReconnectDelay(attempt + 1) : undefined
+        });
+
+        if (!willRetry) {
+          dbg(`Max reconnect attempts (${maxAttempts}) reached, giving up`);
+          dbg(`Final state: Control=${state.control}, CIV=${state.civ}, Audio=${state.audio}`);
+          this.isFullReconnecting = false;
+          return;
+        }
+
+        // Continue loop for retry
+        dbg(`Will retry in ${this.calculateReconnectDelay(attempt + 1)}ms...`);
+      }
+    }
+  }
+
+  /**
+   * Connect with timeout (helper for reconnection)
+   * @private
+   */
+  private async connectWithTimeout(timeout: number): Promise<void> {
+    const timeoutPromise = this.sleep(timeout).then(() => {
+      throw new Error(`Connection timeout after ${timeout}ms`);
+    });
+
+    await Promise.race([
+      this.connect(),
+      timeoutPromise
+    ]);
+  }
+
+  /**
+   * Sleep helper (returns a Promise)
+   * @private
+   */
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Calculate reconnect delay using exponential backoff
+   * @private
+   */
+  private calculateReconnectDelay(attemptNumber: number): number {
+    const delay = this.monitorConfig.reconnectBaseDelay * Math.pow(2, attemptNumber - 1);
+    return Math.min(delay, this.monitorConfig.reconnectMaxDelay);
   }
 }
