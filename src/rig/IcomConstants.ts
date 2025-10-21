@@ -122,10 +122,10 @@ export const METER_CALIBRATION = {
    * Used for converting raw BCD to percentage
    */
   POWER: {
-    /** 50% power reference point */
-    HALF: { raw: 0x0143, percent: 50 },
-    /** 100% power reference point */
-    FULL: { raw: 0x0213, percent: 100 }
+    /** 50% power reference point (raw=143, percent=50) */
+    HALF: { raw: 143, percent: 50 },
+    /** 100% power reference point (raw=213, percent=100) */
+    FULL: { raw: 213, percent: 100 }
   },
 
   /**
@@ -133,10 +133,10 @@ export const METER_CALIBRATION = {
    * Used for converting raw BCD to volts
    */
   VOLTAGE: {
-    /** Low voltage reference: 5V */
-    LOW: { raw: 0x0075, volts: 5.0 },
-    /** High voltage reference: 16V */
-    HIGH: { raw: 0x0241, volts: 16.0 }
+    /** Low voltage reference: 5V (raw=75) */
+    LOW: { raw: 75, volts: 5.0 },
+    /** High voltage reference: 16V (raw=241) */
+    HIGH: { raw: 241, volts: 16.0 }
   },
 
   /**
@@ -144,10 +144,10 @@ export const METER_CALIBRATION = {
    * Used for converting raw BCD to amperes
    */
   CURRENT: {
-    /** Low current reference: 2A */
-    LOW: { raw: 0x0121, amps: 2.0 },
-    /** High current reference: 4A */
-    HIGH: { raw: 0x0241, amps: 4.0 }
+    /** Low current reference: 2A (raw=121) */
+    LOW: { raw: 121, amps: 2.0 },
+    /** High current reference: 4A (raw=241) */
+    HIGH: { raw: 241, amps: 4.0 }
   }
 } as const;
 
