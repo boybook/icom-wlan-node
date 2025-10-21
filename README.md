@@ -111,15 +111,16 @@ await rig.setPtt(false);
   - `reconnectAttempting(ReconnectAttemptInfo)` — reconnect attempt started
   - `reconnectFailed(ReconnectFailedInfo)` — reconnect attempt failed
 - Methods
-  - `connect()` / `disconnect()` — connects control + CIV + audio sub‑sessions; resolves when all ready
-  - `sendCiv(buf: Buffer)` — send a raw CI‑V frame
-  - `setPtt(on: boolean)` — key/unkey; also manages TX meter polling and audio tailing
-  - `sendAudioFloat32(samples: Float32Array, addLeadingBuffer?: boolean)` / `sendAudioPcm16(samples: Int16Array)`
-  - `getConnectionPhase()` — returns current ConnectionPhase (IDLE, CONNECTING, CONNECTED, DISCONNECTING, RECONNECTING)
-  - `getConnectionMetrics()` — returns detailed ConnectionMetrics (phase, uptime, session states, etc.)
-  - `getConnectionState()` — returns per‑session ConnectionState (control, civ, audio)
-  - `isAnySessionDisconnected()` — returns true if any session is disconnected
-  - `configureMonitoring(config)` — configure connection monitoring and auto‑reconnect behavior
+  - **Connection**: `connect()` / `disconnect()` — connects control + CIV + audio sub‑sessions; resolves when all ready
+  - **Raw CI‑V**: `sendCiv(buf: Buffer)` — send a raw CI‑V frame
+  - **Audio TX**: `setPtt(on: boolean)`, `sendAudioFloat32()`, `sendAudioPcm16()`
+  - **Rig Control**: `setFrequency()`, `setMode()`, `setConnectorDataMode()`, `setConnectorWLanLevel()`
+  - **Rig Query**: `readOperatingFrequency()`, `readOperatingMode()`, `readTransmitFrequency()`, `readTransceiverState()`, `readBandEdges()`
+  - **Meters (RX)**: `readSquelchStatus()`, `readAudioSquelch()`, `readOvfStatus()`, `getLevelMeter()`
+  - **Meters (TX)**: `readSWR()`, `readALC()`, `readPowerLevel()`, `readCompLevel()`
+  - **Power Supply**: `readVoltage()`, `readCurrent()`
+  - **Audio Config**: `getConnectorWLanLevel()`
+  - **Connection Monitoring**: `getConnectionPhase()`, `getConnectionMetrics()`, `getConnectionState()`, `isAnySessionDisconnected()`, `configureMonitoring()`
 
 ### Connection Management & Auto-Reconnect
 
@@ -250,10 +251,24 @@ The library exposes common CI‑V operations as friendly methods. Addresses are 
 
 #### Meters & Levels
 
-- `readSWR(options?: QueryOptions) => Promise<{ raw: number; swr: number; alert: boolean } | null>`
-- `readALC(options?: QueryOptions) => Promise<{ raw: number; percent: number; alert: boolean } | null>`
-- `getConnectorWLanLevel(options?: QueryOptions) => Promise<{ raw: number; percent: number } | null>`
-- `getLevelMeter(options?: QueryOptions) => Promise<{ raw: number; percent: number } | null>`
+**Reception Meters** (available anytime):
+- `readSquelchStatus(options?: QueryOptions) => Promise<{ raw: number; isOpen: boolean } | null>` — Squelch gate state (CI-V 0x15/0x01)
+- `readAudioSquelch(options?: QueryOptions) => Promise<{ raw: number; isOpen: boolean } | null>` — Audio squelch state (CI-V 0x15/0x05)
+- `readOvfStatus(options?: QueryOptions) => Promise<{ raw: number; isOverload: boolean } | null>` — ADC overload detection (CI-V 0x15/0x07)
+- `getLevelMeter(options?: QueryOptions) => Promise<{ raw: number; percent: number } | null>` — S-meter level (CI-V 0x15/0x02)
+
+**Transmission Meters** (require PTT on):
+- `readSWR(options?: QueryOptions) => Promise<{ raw: number; swr: number; alert: boolean } | null>` — SWR meter (CI-V 0x15/0x12)
+- `readALC(options?: QueryOptions) => Promise<{ raw: number; percent: number; alert: boolean } | null>` — ALC meter (CI-V 0x15/0x13)
+- `readPowerLevel(options?: QueryOptions) => Promise<{ raw: number; percent: number } | null>` — Output power level (CI-V 0x15/0x11)
+- `readCompLevel(options?: QueryOptions) => Promise<{ raw: number; percent: number } | null>` — Voice compression level (CI-V 0x15/0x14)
+
+**Power Supply Monitoring**:
+- `readVoltage(options?: QueryOptions) => Promise<{ raw: number; volts: number } | null>` — Supply voltage (CI-V 0x15/0x15)
+- `readCurrent(options?: QueryOptions) => Promise<{ raw: number; amps: number } | null>` — Supply current draw (CI-V 0x15/0x16)
+
+**Audio Configuration**:
+- `getConnectorWLanLevel(options?: QueryOptions) => Promise<{ raw: number; percent: number } | null>` — Get WLAN audio level (CI-V 0x1A/0x05/0x01/0x17)
 - `setConnectorWLanLevel(level: number)` — Set WLAN audio level (0-255)
 
 #### Connector Settings
@@ -290,20 +305,75 @@ for (let n = 0; n < 10; n++) {
 }
 await rig.setPtt(false);
 
-// Read meters and connector settings
+// Read reception meters (available anytime)
+const squelch = await rig.readSquelchStatus({ timeout: 2000 });
+if (squelch) {
+  console.log(`Squelch: ${squelch.isOpen ? 'OPEN' : 'CLOSED'}`);
+}
+
+const audioSq = await rig.readAudioSquelch({ timeout: 2000 });
+if (audioSq) {
+  console.log(`Audio Squelch: ${audioSq.isOpen ? 'OPEN' : 'CLOSED'}`);
+}
+
+const ovf = await rig.readOvfStatus({ timeout: 2000 });
+if (ovf) {
+  console.log(`ADC: ${ovf.isOverload ? '⚠️ OVERLOAD' : '✓ OK'}`);
+}
+
+const sMeter = await rig.getLevelMeter({ timeout: 2000 });
+if (sMeter) {
+  console.log(`S-Meter: ${sMeter.percent.toFixed(1)}%`);
+}
+
+// Read power supply monitoring
+const voltage = await rig.readVoltage({ timeout: 2000 });
+if (voltage) {
+  console.log(`Voltage: ${voltage.volts.toFixed(2)}V`);
+}
+
+const current = await rig.readCurrent({ timeout: 2000 });
+if (current) {
+  console.log(`Current: ${current.amps.toFixed(2)}A`);
+}
+
+// Read transmission meters (requires PTT on)
+await rig.setPtt(true);
+await new Promise(r => setTimeout(r, 200)); // Wait for meters to stabilize
+
 const swr = await rig.readSWR({ timeout: 2000 });
+if (swr) {
+  console.log(`SWR: ${swr.swr.toFixed(2)} ${swr.alert ? '⚠️ HIGH' : '✓'}`);
+}
+
 const alc = await rig.readALC({ timeout: 2000 });
+if (alc) {
+  console.log(`ALC: ${alc.percent.toFixed(1)}% ${alc.alert ? '⚠️ HIGH' : '✓'}`);
+}
+
+const power = await rig.readPowerLevel({ timeout: 2000 });
+if (power) {
+  console.log(`Power: ${power.percent.toFixed(1)}%`);
+}
+
+const comp = await rig.readCompLevel({ timeout: 2000 });
+if (comp) {
+  console.log(`COMP: ${comp.percent.toFixed(1)}%`);
+}
+
+await rig.setPtt(false);
+
+// Configure WLAN connector
 const wlanLevel = await rig.getConnectorWLanLevel({ timeout: 2000 });
+if (wlanLevel) {
+  console.log(`WLAN Level: ${wlanLevel.percent.toFixed(1)}%`);
+}
 
 // Set connector to WLAN mode using string constant
 await rig.setConnectorDataMode('WLAN');
 // Or numeric: await rig.setConnectorDataMode(0x03);
 
 await rig.setConnectorWLanLevel(120); // Set WLAN audio level
-
-if (wlanLevel) {
-  console.log(`WLAN Level: ${wlanLevel.percent.toFixed(1)}%`);
-}
 ```
 
 ## Design Notes

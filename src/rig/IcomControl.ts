@@ -2,11 +2,11 @@ import { EventEmitter } from 'events';
 import { CapCapabilitiesPacket, Cmd, ControlPacket, LoginPacket, LoginResponsePacket, RadioCapPacket, Sizes, StatusPacket, TokenPacket, TokenType, ConnInfoPacket, AUDIO_SAMPLE_RATE, XIEGU_TX_BUFFER_SIZE, PingPacket, CivPacket } from '../core/IcomPackets';
 import { dbg, dbgV } from '../utils/debug';
 import { Session } from '../core/Session';
-import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics } from '../types';
+import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SquelchStatusReading, AudioSquelchReading, OvfStatusReading, PowerLevelReading, CompLevelReading, VoltageReading, CurrentReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics } from '../types';
 import { IcomCiv } from './IcomCiv';
 import { IcomAudio } from './IcomAudio';
 import { IcomRigCommands } from './IcomRigCommands';
-import { getModeCode, getConnectorModeCode, DEFAULT_CONTROLLER_ADDR, METER_THRESHOLDS, METER_TIMER_PERIOD_MS } from './IcomConstants';
+import { getModeCode, getConnectorModeCode, DEFAULT_CONTROLLER_ADDR, METER_THRESHOLDS, METER_TIMER_PERIOD_MS, rawToPowerPercent, rawToVoltage, rawToCurrent } from './IcomConstants';
 import { parseTwoByteBcd } from '../utils/bcd';
 
 export class IcomControl {
@@ -780,6 +780,216 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const modeCode = typeof mode === 'string' ? getConnectorModeCode(mode) : mode;
     this.sendCiv(IcomRigCommands.setConnectorDataMode(ctrAddr, rigAddr, modeCode));
+  }
+
+  /**
+   * Read squelch status (noise/signal gate state)
+   * @param options - Query options (timeout in ms, default 3000)
+   * @returns Squelch status with raw value and boolean state
+   * @example
+   * const status = await rig.readSquelchStatus({ timeout: 2000 });
+   * if (status) {
+   *   console.log(`Squelch: ${status.isOpen ? 'OPEN' : 'CLOSED'}`);
+   * }
+   */
+  async readSquelchStatus(options?: QueryOptions): Promise<SquelchStatusReading | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.getSquelchStatus(ctrAddr, rigAddr);
+    const resp = await this.waitForCivFrame(
+      (frame) => IcomControl.isMeterReply(frame, 0x01, ctrAddr, rigAddr),
+      timeoutMs,
+      () => this.sendCiv(req)
+    );
+
+    const raw = IcomControl.extractMeterData(resp);
+    if (raw === null) return null;
+
+    return {
+      raw,
+      isOpen: raw === 0x0001
+    };
+  }
+
+  /**
+   * Read audio squelch state
+   * @param options - Query options (timeout in ms, default 3000)
+   * @returns Audio squelch status with raw value and boolean state
+   * @example
+   * const squelch = await rig.readAudioSquelch({ timeout: 2000 });
+   * if (squelch) {
+   *   console.log(`Audio Squelch: ${squelch.isOpen ? 'OPEN' : 'CLOSED'}`);
+   * }
+   */
+  async readAudioSquelch(options?: QueryOptions): Promise<AudioSquelchReading | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.getAudioSquelch(ctrAddr, rigAddr);
+    const resp = await this.waitForCivFrame(
+      (frame) => IcomControl.isMeterReply(frame, 0x05, ctrAddr, rigAddr),
+      timeoutMs,
+      () => this.sendCiv(req)
+    );
+
+    const raw = IcomControl.extractMeterData(resp);
+    if (raw === null) return null;
+
+    return {
+      raw,
+      isOpen: raw === 0x0001
+    };
+  }
+
+  /**
+   * Read OVF (ADC overload) status
+   * @param options - Query options (timeout in ms, default 3000)
+   * @returns OVF status with raw value and boolean overload flag
+   * @example
+   * const ovf = await rig.readOvfStatus({ timeout: 2000 });
+   * if (ovf) {
+   *   console.log(`ADC: ${ovf.isOverload ? '⚠️ OVERLOAD' : '✓ OK'}`);
+   * }
+   */
+  async readOvfStatus(options?: QueryOptions): Promise<OvfStatusReading | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.getOvfStatus(ctrAddr, rigAddr);
+    const resp = await this.waitForCivFrame(
+      (frame) => IcomControl.isMeterReply(frame, 0x07, ctrAddr, rigAddr),
+      timeoutMs,
+      () => this.sendCiv(req)
+    );
+
+    const raw = IcomControl.extractMeterData(resp);
+    if (raw === null) return null;
+
+    return {
+      raw,
+      isOverload: raw === 0x0001
+    };
+  }
+
+  /**
+   * Read power output level during transmission
+   * @param options - Query options (timeout in ms, default 3000)
+   * @returns Power level with raw value and percentage
+   * @example
+   * const power = await rig.readPowerLevel({ timeout: 2000 });
+   * if (power) {
+   *   console.log(`Power: ${power.percent.toFixed(1)}%`);
+   * }
+   */
+  async readPowerLevel(options?: QueryOptions): Promise<PowerLevelReading | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.getPowerLevel(ctrAddr, rigAddr);
+    const resp = await this.waitForCivFrame(
+      (frame) => IcomControl.isMeterReply(frame, 0x11, ctrAddr, rigAddr),
+      timeoutMs,
+      () => this.sendCiv(req)
+    );
+
+    const raw = IcomControl.extractMeterData(resp);
+    if (raw === null) return null;
+
+    return {
+      raw,
+      percent: rawToPowerPercent(raw)
+    };
+  }
+
+  /**
+   * Read COMP (voice compression) level during transmission
+   * @param options - Query options (timeout in ms, default 3000)
+   * @returns Compression level with raw value and percentage
+   * @example
+   * const comp = await rig.readCompLevel({ timeout: 2000 });
+   * if (comp) {
+   *   console.log(`COMP: ${comp.percent.toFixed(1)}%`);
+   * }
+   */
+  async readCompLevel(options?: QueryOptions): Promise<CompLevelReading | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.getCompLevel(ctrAddr, rigAddr);
+    const resp = await this.waitForCivFrame(
+      (frame) => IcomControl.isMeterReply(frame, 0x14, ctrAddr, rigAddr),
+      timeoutMs,
+      () => this.sendCiv(req)
+    );
+
+    const raw = IcomControl.extractMeterData(resp);
+    if (raw === null) return null;
+
+    return {
+      raw,
+      percent: (raw / 255) * 100
+    };
+  }
+
+  /**
+   * Read power supply voltage
+   * @param options - Query options (timeout in ms, default 3000)
+   * @returns Voltage reading with raw value and volts
+   * @example
+   * const voltage = await rig.readVoltage({ timeout: 2000 });
+   * if (voltage) {
+   *   console.log(`Voltage: ${voltage.volts.toFixed(2)}V`);
+   * }
+   */
+  async readVoltage(options?: QueryOptions): Promise<VoltageReading | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.getVoltage(ctrAddr, rigAddr);
+    const resp = await this.waitForCivFrame(
+      (frame) => IcomControl.isMeterReply(frame, 0x15, ctrAddr, rigAddr),
+      timeoutMs,
+      () => this.sendCiv(req)
+    );
+
+    const raw = IcomControl.extractMeterData(resp);
+    if (raw === null) return null;
+
+    return {
+      raw,
+      volts: rawToVoltage(raw)
+    };
+  }
+
+  /**
+   * Read power supply current draw
+   * @param options - Query options (timeout in ms, default 3000)
+   * @returns Current reading with raw value and amperes
+   * @example
+   * const current = await rig.readCurrent({ timeout: 2000 });
+   * if (current) {
+   *   console.log(`Current: ${current.amps.toFixed(2)}A`);
+   * }
+   */
+  async readCurrent(options?: QueryOptions): Promise<CurrentReading | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.getCurrent(ctrAddr, rigAddr);
+    const resp = await this.waitForCivFrame(
+      (frame) => IcomControl.isMeterReply(frame, 0x16, ctrAddr, rigAddr),
+      timeoutMs,
+      () => this.sendCiv(req)
+    );
+
+    const raw = IcomControl.extractMeterData(resp);
+    if (raw === null) return null;
+
+    return {
+      raw,
+      amps: rawToCurrent(raw)
+    };
   }
 
   private static isReplyOf(frame: Buffer, cmd: number, ctrAddr: number, rigAddr: number) {

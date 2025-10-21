@@ -68,5 +68,33 @@ export const IcomRigCommands = {
   setConnectorDataMode(ctrAddr: number, rigAddr: number, mode: number): Buffer {
     // FE FE [rig] [ctr] 0x1A 0x05 0x01 0x19 [mode] FD
     return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x1a, 0x05, 0x01, 0x19, mode & 0xff, 0xfd]);
+  },
+  getSquelchStatus(ctrAddr: number, rigAddr: number): Buffer {
+    // FE FE [rig] [ctr] 0x15 0x01 FD
+    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x15, 0x01, 0xfd]);
+  },
+  getAudioSquelch(ctrAddr: number, rigAddr: number): Buffer {
+    // FE FE [rig] [ctr] 0x15 0x05 FD
+    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x15, 0x05, 0xfd]);
+  },
+  getOvfStatus(ctrAddr: number, rigAddr: number): Buffer {
+    // FE FE [rig] [ctr] 0x15 0x07 FD
+    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x15, 0x07, 0xfd]);
+  },
+  getPowerLevel(ctrAddr: number, rigAddr: number): Buffer {
+    // FE FE [rig] [ctr] 0x15 0x11 FD
+    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x15, 0x11, 0xfd]);
+  },
+  getCompLevel(ctrAddr: number, rigAddr: number): Buffer {
+    // FE FE [rig] [ctr] 0x15 0x14 FD
+    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x15, 0x14, 0xfd]);
+  },
+  getVoltage(ctrAddr: number, rigAddr: number): Buffer {
+    // FE FE [rig] [ctr] 0x15 0x15 FD
+    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x15, 0x15, 0xfd]);
+  },
+  getCurrent(ctrAddr: number, rigAddr: number): Buffer {
+    // FE FE [rig] [ctr] 0x15 0x16 FD
+    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x15, 0x16, 0xfd]);
   }
 };

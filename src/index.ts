@@ -10,11 +10,15 @@ export {
   CONNECTOR_MODE_MAP,
   DEFAULT_CONTROLLER_ADDR,
   METER_THRESHOLDS,
+  METER_CALIBRATION,
   getModeCode,
   getConnectorModeCode,
   getModeString,
   getConnectorModeString,
-  getFilterString
+  getFilterString,
+  rawToPowerPercent,
+  rawToVoltage,
+  rawToCurrent
 } from './rig/IcomConstants';
 
 // Export BCD utilities

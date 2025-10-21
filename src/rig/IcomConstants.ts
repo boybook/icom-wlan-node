@@ -111,3 +111,104 @@ export const METER_THRESHOLDS = {
  * Matches FT8CN's IComPacketTypes.METER_TIMER_PERIOD_MS
  */
 export const METER_TIMER_PERIOD_MS = 500;
+
+/**
+ * Meter calibration constants for physical unit conversion
+ * Based on IC-705 official CI-V reference manual
+ */
+export const METER_CALIBRATION = {
+  /**
+   * Power level (CI-V 0x15/0x11) calibration points
+   * Used for converting raw BCD to percentage
+   */
+  POWER: {
+    /** 50% power reference point */
+    HALF: { raw: 0x0143, percent: 50 },
+    /** 100% power reference point */
+    FULL: { raw: 0x0213, percent: 100 }
+  },
+
+  /**
+   * Voltage (CI-V 0x15/0x15) calibration points
+   * Used for converting raw BCD to volts
+   */
+  VOLTAGE: {
+    /** Low voltage reference: 5V */
+    LOW: { raw: 0x0075, volts: 5.0 },
+    /** High voltage reference: 16V */
+    HIGH: { raw: 0x0241, volts: 16.0 }
+  },
+
+  /**
+   * Current (CI-V 0x15/0x16) calibration points
+   * Used for converting raw BCD to amperes
+   */
+  CURRENT: {
+    /** Low current reference: 2A */
+    LOW: { raw: 0x0121, amps: 2.0 },
+    /** High current reference: 4A */
+    HIGH: { raw: 0x0241, amps: 4.0 }
+  }
+} as const;
+
+/**
+ * Linear interpolation helper for meter value conversion
+ * @param raw - Raw BCD value
+ * @param x1 - Lower calibration point (raw value)
+ * @param y1 - Lower calibration point (physical value)
+ * @param x2 - Upper calibration point (raw value)
+ * @param y2 - Upper calibration point (physical value)
+ * @returns Interpolated physical value
+ */
+function linearInterpolate(raw: number, x1: number, y1: number, x2: number, y2: number): number {
+  // Clamp to range
+  if (raw <= x1) return y1;
+  if (raw >= x2) return y2;
+  // Linear interpolation: y = y1 + (raw - x1) * (y2 - y1) / (x2 - x1)
+  return y1 + ((raw - x1) * (y2 - y1)) / (x2 - x1);
+}
+
+/**
+ * Convert raw power level to percentage
+ * @param raw - Raw BCD value (0-255)
+ * @returns Power percentage (0-100%)
+ */
+export function rawToPowerPercent(raw: number): number {
+  return linearInterpolate(
+    raw,
+    METER_CALIBRATION.POWER.HALF.raw,
+    METER_CALIBRATION.POWER.HALF.percent,
+    METER_CALIBRATION.POWER.FULL.raw,
+    METER_CALIBRATION.POWER.FULL.percent
+  );
+}
+
+/**
+ * Convert raw voltage reading to volts
+ * @param raw - Raw BCD value (0-255)
+ * @returns Voltage in volts
+ */
+export function rawToVoltage(raw: number): number {
+  return linearInterpolate(
+    raw,
+    METER_CALIBRATION.VOLTAGE.LOW.raw,
+    METER_CALIBRATION.VOLTAGE.LOW.volts,
+    METER_CALIBRATION.VOLTAGE.HIGH.raw,
+    METER_CALIBRATION.VOLTAGE.HIGH.volts
+  );
+}
+
+/**
+ * Convert raw current reading to amperes
+ * @param raw - Raw BCD value (0-255)
+ * @returns Current in amperes
+ */
+export function rawToCurrent(raw: number): number {
+  return linearInterpolate(
+    raw,
+    METER_CALIBRATION.CURRENT.LOW.raw,
+    METER_CALIBRATION.CURRENT.LOW.amps,
+    METER_CALIBRATION.CURRENT.HIGH.raw,
+    METER_CALIBRATION.CURRENT.HIGH.amps
+  );
+}

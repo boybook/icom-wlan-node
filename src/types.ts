@@ -196,6 +196,92 @@ export interface LevelMeterReading {
   percent: number;
 }
 
+/**
+ * Squelch status reading (CI-V 0x15/0x01)
+ * Indicates whether noise/signal squelch gate is open or closed
+ */
+export interface SquelchStatusReading {
+  /** Raw BCD value (0 or 1) */
+  raw: number;
+  /** True if squelch is open (signal present), false if closed (no signal) */
+  isOpen: boolean;
+}
+
+/**
+ * Audio squelch reading (CI-V 0x15/0x05)
+ * Indicates audio squelch state
+ */
+export interface AudioSquelchReading {
+  /** Raw BCD value (0 or 1) */
+  raw: number;
+  /** True if audio squelch is open, false if closed */
+  isOpen: boolean;
+}
+
+/**
+ * OVF (ADC overload) status reading (CI-V 0x15/0x07)
+ * Indicates whether the ADC (analog-to-digital converter) is overloading
+ */
+export interface OvfStatusReading {
+  /** Raw BCD value (0 or 1) */
+  raw: number;
+  /** True if ADC is overloading, false if normal */
+  isOverload: boolean;
+}
+
+/**
+ * Power output level reading (CI-V 0x15/0x11)
+ * Represents transmitter output power level
+ */
+export interface PowerLevelReading {
+  /**
+   * Raw BCD value (0-255)
+   * Calibration: 0143≈50%, 0213≈100%
+   */
+  raw: number;
+  /** Percentage of maximum power (0-100%) */
+  percent: number;
+}
+
+/**
+ * COMP (voice compression) level reading (CI-V 0x15/0x14)
+ * Represents speech compressor level during transmission
+ */
+export interface CompLevelReading {
+  /** Raw BCD value (0-255) */
+  raw: number;
+  /** Percentage of maximum compression (0-100%) */
+  percent: number;
+}
+
+/**
+ * Voltage reading (CI-V 0x15/0x15)
+ * Represents power supply voltage
+ */
+export interface VoltageReading {
+  /**
+   * Raw BCD value (0-255)
+   * Calibration: 0075≈5V, 0241≈16V
+   */
+  raw: number;
+  /** Voltage in volts */
+  volts: number;
+}
+
+/**
+ * Current reading (CI-V 0x15/0x16)
+ * Represents power supply current draw
+ */
+export interface CurrentReading {
+  /**
+   * Raw BCD value (0-255)
+   * Calibration: 0121≈2A, 0241≈4A
+   */
+  raw: number;
+  /** Current in amperes */
+  amps: number;
+}
+
 // ============================================================================
 // Connection Monitoring Types
 // ============================================================================
