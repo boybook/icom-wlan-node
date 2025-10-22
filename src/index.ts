@@ -27,3 +27,10 @@ export { parseTwoByteBcd, intToTwoByteBcd } from './utils/bcd';
 // Export low-level utilities (for advanced users)
 export { IcomRigCommands } from './rig/IcomRigCommands';
 export { AUDIO_RATE } from './rig/IcomAudio';
+
+// Export error handling utilities (optional, for robustness)
+export {
+  setupGlobalErrorHandlers,
+  setupBasicErrorProtection,
+  GlobalErrorHandlerOptions
+} from './utils/errorHandling';

@@ -286,25 +286,50 @@ export class IcomControl {
     const abortHandler = (reason: string) => {
       dbg(`Aborting connection session ${sessionId}: ${reason}`);
       const error = new Error(reason);
-      rejectLogin(error);
-      rejectCiv(error);
-      rejectAudio(error);
+
+      // Defensive error handling: wrap reject calls in try-catch to prevent
+      // synchronous errors from propagating if promises are already settled
+      try {
+        rejectLogin(error);
+      } catch (err) {
+        dbg(`Warning: Failed to reject loginReady promise: ${err}`);
+      }
+
+      try {
+        rejectCiv(error);
+      } catch (err) {
+        dbg(`Warning: Failed to reject civReady promise: ${err}`);
+      }
+
+      try {
+        rejectAudio(error);
+      } catch (err) {
+        dbg(`Warning: Failed to reject audioReady promise: ${err}`);
+      }
     };
     this.abortHandlers.set(sessionId, abortHandler);
+
+    // Track promise states for defensive cleanup
+    let loginResolved = false;
+    let civResolved = false;
+    let audioResolved = false;
 
     // Temporary event listeners (local scope)
     const onLogin = (res: LoginResult) => {
       if (res.ok) {
-        dbg('Login ready - resolving local loginReady promise');
+        dbg(`Login ready - resolving local loginReady promise (sessionId=${sessionId})`);
+        loginResolved = true;
         resolveLogin();
       }
     };
     const onCivReady = () => {
-      dbg('CIV ready - resolving local civReady promise');
+      dbg(`CIV ready - resolving local civReady promise (sessionId=${sessionId})`);
+      civResolved = true;
       resolveCiv();
     };
     const onAudioReady = () => {
-      dbg('Audio ready - resolving local audioReady promise');
+      dbg(`Audio ready - resolving local audioReady promise (sessionId=${sessionId})`);
+      audioResolved = true;
       resolveAudio();
     };
 
@@ -317,13 +342,37 @@ export class IcomControl {
       civReady,
       audioReady,
       cleanup: () => {
+        // Defensive cleanup: wrap each cleanup step in try-catch
+        // to ensure all cleanup steps execute even if one fails
+        dbg(`Cleaning up connection session ${sessionId} (login=${loginResolved}, civ=${civResolved}, audio=${audioResolved})`);
+
         // Remove abort handler for this specific sessionId
-        // This is safe because the connection attempt is complete (success or failure)
-        this.abortHandlers.delete(sessionId);
-        // Remove event listeners
-        this.ev.off('login', onLogin);
-        this.ev.off('_civReady', onCivReady);
-        this.ev.off('_audioReady', onAudioReady);
+        try {
+          this.abortHandlers.delete(sessionId);
+        } catch (err) {
+          dbg(`Warning: Failed to delete abort handler: ${err}`);
+        }
+
+        // Remove event listeners - wrap each in try-catch
+        try {
+          this.ev.off('login', onLogin);
+        } catch (err) {
+          dbg(`Warning: Failed to remove login listener: ${err}`);
+        }
+
+        try {
+          this.ev.off('_civReady', onCivReady);
+        } catch (err) {
+          dbg(`Warning: Failed to remove civReady listener: ${err}`);
+        }
+
+        try {
+          this.ev.off('_audioReady', onAudioReady);
+        } catch (err) {
+          dbg(`Warning: Failed to remove audioReady listener: ${err}`);
+        }
+
+        dbg(`Cleanup complete for session ${sessionId}`);
       }
     };
   }
@@ -398,11 +447,17 @@ export class IcomControl {
       return;
     }
 
-    // Abort any ongoing connection attempts
+    // Abort any ongoing connection attempts - wrap in try-catch for defensive programming
     const currentSessionId = this.connectionSession.sessionId;
     if (currentPhase === ConnectionPhase.CONNECTING || currentPhase === ConnectionPhase.RECONNECTING) {
-      dbg(`Aborting ongoing connection attempt (sessionId=${currentSessionId})`);
-      this.abortConnectionAttempt(currentSessionId, 'User disconnect()');
+      try {
+        dbg(`Aborting ongoing connection attempt (sessionId=${currentSessionId})`);
+        this.abortConnectionAttempt(currentSessionId, 'User disconnect()');
+      } catch (abortErr) {
+        // Log but continue - abort failure shouldn't prevent disconnect
+        const errMsg = abortErr instanceof Error ? abortErr.message : String(abortErr);
+        dbg(`Warning: Failed to abort connection attempt: ${errMsg} - continuing with disconnect`);
+      }
     }
 
     // Transition to DISCONNECTING state
@@ -1620,9 +1675,15 @@ export class IcomControl {
         await this.sleep(delay);
 
         try {
-          // Disconnect all sessions
+          // Disconnect all sessions - wrap in try-catch to prevent disconnect errors from aborting reconnect
           dbg('Full reconnect: disconnecting all sessions');
-          await this.disconnect();
+          try {
+            await this.disconnect();
+          } catch (disconnectErr) {
+            // Log but don't fail - we still want to attempt reconnect even if disconnect fails
+            const errMsg = disconnectErr instanceof Error ? disconnectErr.message : String(disconnectErr);
+            dbg(`Warning: Disconnect failed during reconnect: ${errMsg} - continuing with reconnect anyway`);
+          }
 
           // Wait longer before reconnecting to allow rig to fully clean up old connection
           // This is critical - rig may report CONNINFO busy=true if we reconnect too quickly
