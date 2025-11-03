@@ -29,7 +29,7 @@ npm run build
 ## Quick Start
 
 ```ts
-import { IcomControl, AUDIO_RATE } from 'icom-wlan-node';
+import { IcomControl, AUDIO_RATE, DisconnectReason } from 'icom-wlan-node';
 
 const rig = new IcomControl({
   control: { ip: '192.168.1.50', port: 50001 },
@@ -111,7 +111,8 @@ await rig.setPtt(false);
   - `reconnectAttempting(ReconnectAttemptInfo)` — reconnect attempt started
   - `reconnectFailed(ReconnectFailedInfo)` — reconnect attempt failed
 - Methods
-  - **Connection**: `connect()` / `disconnect()` — connects control + CIV + audio sub‑sessions; resolves when all ready
+  - **Connection**: `connect()` / `disconnect(options?)` — connects control + CIV + audio sub‑sessions; resolves when all ready
+    - `disconnect()` accepts optional `DisconnectOptions` or `DisconnectReason` for better error handling
   - **Raw CI‑V**: `sendCiv(buf: Buffer)` — send a raw CI‑V frame
   - **Audio TX**: `setPtt(on: boolean)`, `sendAudioFloat32()`, `sendAudioPcm16()`
   - **Rig Control**: `setFrequency()`, `setMode()`, `setConnectorDataMode()`, `setConnectorWLanLevel()`
@@ -151,6 +152,12 @@ console.log(metrics.sessions);    // Per-session states {control, civ, audio}
 
 // Disconnect (also idempotent)
 await rig.disconnect();
+
+// Disconnect with reason (provides better error messages)
+await rig.disconnect(DisconnectReason.TIMEOUT);
+
+// Silent disconnect (cleanup mode - no error events)
+await rig.disconnect({ reason: DisconnectReason.CLEANUP, silent: true });
 ```
 
 #### Connection Monitoring Events

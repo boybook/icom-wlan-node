@@ -2,12 +2,13 @@ import { EventEmitter } from 'events';
 import { CapCapabilitiesPacket, Cmd, ControlPacket, LoginPacket, LoginResponsePacket, RadioCapPacket, Sizes, StatusPacket, TokenPacket, TokenType, ConnInfoPacket, AUDIO_SAMPLE_RATE, XIEGU_TX_BUFFER_SIZE, PingPacket, CivPacket } from '../core/IcomPackets';
 import { dbg, dbgV } from '../utils/debug';
 import { Session } from '../core/Session';
-import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SquelchStatusReading, AudioSquelchReading, OvfStatusReading, PowerLevelReading, CompLevelReading, VoltageReading, CurrentReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics } from '../types';
+import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SquelchStatusReading, AudioSquelchReading, OvfStatusReading, PowerLevelReading, CompLevelReading, VoltageReading, CurrentReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics, DisconnectReason, DisconnectOptions } from '../types';
 import { IcomCiv } from './IcomCiv';
 import { IcomAudio } from './IcomAudio';
 import { IcomRigCommands } from './IcomRigCommands';
 import { getModeCode, getConnectorModeCode, DEFAULT_CONTROLLER_ADDR, METER_THRESHOLDS, METER_TIMER_PERIOD_MS, rawToPowerPercent, rawToVoltage, rawToCurrent } from './IcomConstants';
 import { parseTwoByteBcd } from '../utils/bcd';
+import { ConnectionAbortedError, getDisconnectMessage } from '../utils/errors';
 
 export class IcomControl {
   private ev: RigEventEmitter = new EventEmitter() as RigEventEmitter;
@@ -31,7 +32,7 @@ export class IcomControl {
   };
   private nextSessionId = 1;
   // Map of sessionId -> abort function for cancelling ongoing connection attempts
-  private abortHandlers = new Map<number, (reason: string) => void>();
+  private abortHandlers = new Map<number, (reason: DisconnectReason, silent: boolean) => void>();
 
   // Unified connection monitoring
   private monitorTimer?: NodeJS.Timeout;
@@ -129,11 +130,16 @@ export class IcomControl {
    * Abort an ongoing connection attempt by session ID
    * @private
    */
-  private abortConnectionAttempt(sessionId: number, reason: string) {
+  private abortConnectionAttempt(
+    sessionId: number,
+    reason: DisconnectReason,
+    silent: boolean = false
+  ) {
     const abortHandler = this.abortHandlers.get(sessionId);
     if (abortHandler) {
-      dbg(`Aborting connection session ${sessionId}: ${reason}`);
-      abortHandler(reason);
+      const message = getDisconnectMessage(reason);
+      dbg(`Aborting connection session ${sessionId}: ${message} (silent=${silent})`);
+      abortHandler(reason, silent);
       this.abortHandlers.delete(sessionId);
     }
   }
@@ -283,29 +289,33 @@ export class IcomControl {
 
     // Store abort handler bound to this specific sessionId
     // This prevents race conditions when multiple connection attempts overlap
-    const abortHandler = (reason: string) => {
-      dbg(`Aborting connection session ${sessionId}: ${reason}`);
-      const error = new Error(reason);
+    const abortHandler = (reason: DisconnectReason, silent: boolean) => {
+      const message = getDisconnectMessage(reason);
+      dbg(`Aborting connection session ${sessionId}: ${message} (silent=${silent})`);
+
+      // Create a single error instance to be shared across all rejections
+      const error = new ConnectionAbortedError(
+        reason,
+        sessionId,
+        this.connectionSession.phase
+      );
+
+      // IMPORTANT: Always reject promises to unblock waiting code
+      // The "silent" flag only affects whether errors propagate to user code,
+      // but internally we must settle the promise to prevent hanging
+      dbg(`${silent ? 'Silent' : 'Normal'} abort - rejecting login promise for session ${sessionId}`);
 
       // Defensive error handling: wrap reject calls in try-catch to prevent
       // synchronous errors from propagating if promises are already settled
+      // Only reject one promise to avoid duplicate errors
       try {
         rejectLogin(error);
       } catch (err) {
         dbg(`Warning: Failed to reject loginReady promise: ${err}`);
       }
 
-      try {
-        rejectCiv(error);
-      } catch (err) {
-        dbg(`Warning: Failed to reject civReady promise: ${err}`);
-      }
-
-      try {
-        rejectAudio(error);
-      } catch (err) {
-        dbg(`Warning: Failed to reject audioReady promise: ${err}`);
-      }
+      // Don't reject civ and audio promises separately - they'll be cleaned up
+      // This prevents the "3x User disconnect()" log spam
     };
     this.abortHandlers.set(sessionId, abortHandler);
 
@@ -423,8 +433,22 @@ export class IcomControl {
     }
   }
 
-  async disconnect() {
+  /**
+   * Disconnect from the rig
+   * @param options - Optional disconnect options (reason, silent mode)
+   * @returns Promise that resolves when disconnect is complete
+   */
+  async disconnect(options?: DisconnectOptions | DisconnectReason): Promise<void> {
+    // Support both object and enum parameter for backward compatibility
+    const opts = typeof options === 'string'
+      ? { reason: options, silent: false }
+      : { reason: DisconnectReason.USER_REQUEST, silent: false, ...options };
+
+    const reason: DisconnectReason = opts.reason ?? DisconnectReason.USER_REQUEST;
+    const silent = opts.silent ?? false;
     const currentPhase = this.connectionSession.phase;
+
+    dbg(`disconnect() called with reason=${reason}, silent=${silent}, currentPhase=${currentPhase}`);
 
     // If already disconnecting or idle, avoid duplicate work
     if (currentPhase === ConnectionPhase.DISCONNECTING) {
@@ -452,7 +476,7 @@ export class IcomControl {
     if (currentPhase === ConnectionPhase.CONNECTING || currentPhase === ConnectionPhase.RECONNECTING) {
       try {
         dbg(`Aborting ongoing connection attempt (sessionId=${currentSessionId})`);
-        this.abortConnectionAttempt(currentSessionId, 'User disconnect()');
+        this.abortConnectionAttempt(currentSessionId, reason, silent);
       } catch (abortErr) {
         // Log but continue - abort failure shouldn't prevent disconnect
         const errMsg = abortErr instanceof Error ? abortErr.message : String(abortErr);
@@ -461,7 +485,8 @@ export class IcomControl {
     }
 
     // Transition to DISCONNECTING state
-    this.transitionTo(ConnectionPhase.DISCONNECTING, 'User disconnect()');
+    const transitionReason = getDisconnectMessage(reason);
+    this.transitionTo(ConnectionPhase.DISCONNECTING, transitionReason);
 
     try {
       // 1. Stop all timers first to prevent interference
@@ -1213,7 +1238,7 @@ export class IcomControl {
           const currentPhase = this.connectionSession.phase;
           if (currentPhase === ConnectionPhase.CONNECTING || currentPhase === ConnectionPhase.RECONNECTING) {
             dbg('Aborting ongoing connection attempt due to connected=false');
-            this.abortConnectionAttempt(this.connectionSession.sessionId, 'Radio reported connected=false');
+            this.abortConnectionAttempt(this.connectionSession.sessionId, DisconnectReason.ERROR, false);
           } else if (currentPhase === ConnectionPhase.CONNECTED) {
             // Trigger reconnection for established connection
             dbg('Triggering reconnection for established connection');

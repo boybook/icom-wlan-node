@@ -34,3 +34,9 @@ export {
   setupBasicErrorProtection,
   GlobalErrorHandlerOptions
 } from './utils/errorHandling';
+
+// Export disconnect error utilities
+export {
+  ConnectionAbortedError,
+  getDisconnectMessage
+} from './utils/errors';

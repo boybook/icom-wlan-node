@@ -428,6 +428,41 @@ export interface ReconnectFailedInfo {
 }
 
 /**
+ * Reason for disconnection
+ * Used to distinguish between different types of disconnections
+ */
+export enum DisconnectReason {
+  /** User explicitly called disconnect() */
+  USER_REQUEST = 'user_request',
+  /** Connection timed out */
+  TIMEOUT = 'timeout',
+  /** Cleanup after connection failure */
+  CLEANUP = 'cleanup',
+  /** Error occurred during connection */
+  ERROR = 'error',
+  /** Network connection was lost */
+  NETWORK_LOST = 'network_lost'
+}
+
+/**
+ * Options for disconnect() method
+ */
+export interface DisconnectOptions {
+  /**
+   * Reason for disconnection
+   * Used to generate appropriate error messages and logs
+   */
+  reason?: DisconnectReason;
+
+  /**
+   * Silent mode - don't throw exceptions or emit error events
+   * Useful for cleanup operations where exceptions are not desired
+   * Default: false
+   */
+  silent?: boolean;
+}
+
+/**
  * Configuration for connection monitoring
  */
 export interface ConnectionMonitorConfig {

@@ -127,6 +127,9 @@ export class Session {
    * (especially important after radio restart)
    */
   resetState() {
+    // Stop all timers to prevent leaks and interference with new connection
+    this.stopTimers();
+
     // Reset destroyed flag to ensure session is usable after state reset
     this.destroyed = false;
 

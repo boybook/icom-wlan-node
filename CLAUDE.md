@@ -277,4 +277,77 @@ const len = be16.read(buf, 0x16);  // 明确使用be16，与文档和ENDIAN_VERI
 
 ---
 
-最后更新：2025-01-20
+## 最近优化（2025-01-03）
+
+### 优化1：改进disconnect()错误处理
+
+**背景**：之前所有断开操作都使用硬编码的"User disconnect()"错误信息，导致：
+- 无法区分用户主动断开、超时清理、错误断开
+- 每次清理产生3次重复的Promise rejection日志
+- 掩盖真实的连接错误
+
+**改进**：
+1. 新增 `DisconnectReason` 枚举（src/types.ts）：
+   ```typescript
+   enum DisconnectReason {
+     USER_REQUEST = 'user_request',  // 用户主动
+     TIMEOUT = 'timeout',             // 超时
+     CLEANUP = 'cleanup',             // 清理
+     ERROR = 'error',                 // 错误
+     NETWORK_LOST = 'network_lost'    // 网络丢失
+   }
+   ```
+
+2. 新增 `DisconnectOptions` 接口（src/types.ts）：
+   ```typescript
+   interface DisconnectOptions {
+     reason?: DisconnectReason;
+     silent?: boolean;  // 静默模式，不抛出异常
+   }
+   ```
+
+3. 新增 `ConnectionAbortedError` 错误类（src/utils/errors.ts）：
+   - 包含详细上下文（reason, sessionId, phase）
+   - 提供语义化错误信息
+   - 支持silent检查
+
+4. 更新 `disconnect()` 方法签名：
+   ```typescript
+   // 向前兼容
+   disconnect(): Promise<void>
+   disconnect(reason: DisconnectReason): Promise<void>
+   disconnect(options: DisconnectOptions): Promise<void>
+   ```
+
+5. 优化 `abortHandler` 逻辑（IcomControl.ts）：
+   - 合并3个Promise rejection为1个（消除日志噪音）
+   - 支持silent模式（清理时不抛异常）
+   - 使用ConnectionAbortedError提供详细上下文
+
+**Breaking Change**（小幅）：
+- ❌ 错误信息从"User disconnect()"变为语义化消息（如"Connection cleanup"）
+- ✅ disconnect()仍可无参数调用（向后兼容）
+
+**使用示例**：
+```typescript
+// 用户主动断开（默认）
+await rig.disconnect();
+
+// 超时清理（提供原因）
+await rig.disconnect(DisconnectReason.TIMEOUT);
+
+// 静默清理（不抛异常）
+await rig.disconnect({ reason: DisconnectReason.CLEANUP, silent: true });
+```
+
+### 优化2：修复Session.resetState()定时器泄漏
+
+**问题**：resetState()重置状态但未停止定时器，可能导致重连时旧定时器仍在运行。
+
+**修复**：在resetState()开始处调用stopTimers()。
+
+**影响**：防止重连时定时器泄漏和重复ping/idle包。
+
+---
+
+最后更新：2025-01-03
