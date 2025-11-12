@@ -262,7 +262,7 @@ The library exposes common CI‑V operations as friendly methods. Addresses are 
 - `readSquelchStatus(options?: QueryOptions) => Promise<{ raw: number; isOpen: boolean } | null>` — Squelch gate state (CI-V 0x15/0x01)
 - `readAudioSquelch(options?: QueryOptions) => Promise<{ raw: number; isOpen: boolean } | null>` — Audio squelch state (CI-V 0x15/0x05)
 - `readOvfStatus(options?: QueryOptions) => Promise<{ raw: number; isOverload: boolean } | null>` — ADC overload detection (CI-V 0x15/0x07)
-- `getLevelMeter(options?: QueryOptions) => Promise<{ raw: number; percent: number } | null>` — S-meter level (CI-V 0x15/0x02)
+- `getLevelMeter(options?: QueryOptions) => Promise<{ raw: number; percent: number; sUnits: number; dbAboveS9?: number; dBm: number; formatted: string } | null>` — S-meter (signal strength) with physical units (CI-V 0x15/0x02)
 
 **Transmission Meters** (require PTT on):
 - `readSWR(options?: QueryOptions) => Promise<{ raw: number; swr: number; alert: boolean } | null>` — SWR meter (CI-V 0x15/0x12)
@@ -330,7 +330,8 @@ if (ovf) {
 
 const sMeter = await rig.getLevelMeter({ timeout: 2000 });
 if (sMeter) {
-  console.log(`S-Meter: ${sMeter.percent.toFixed(1)}%`);
+  console.log(`S-Meter: ${sMeter.formatted} (${sMeter.sUnits.toFixed(1)} S-units, ${sMeter.dBm.toFixed(1)} dBm)`);
+  // Example output: "S-Meter: S9+10dB (9.9 S-units, -63.1 dBm)"
 }
 
 // Read power supply monitoring

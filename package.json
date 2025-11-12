@@ -1,6 +1,6 @@
 {
   "name": "icom-wlan-node",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Icom WLAN (CI‑V, audio) protocol implementation for Node.js/TypeScript.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

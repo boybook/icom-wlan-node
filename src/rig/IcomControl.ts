@@ -9,6 +9,7 @@ import { IcomRigCommands } from './IcomRigCommands';
 import { getModeCode, getConnectorModeCode, DEFAULT_CONTROLLER_ADDR, METER_THRESHOLDS, METER_TIMER_PERIOD_MS, rawToPowerPercent, rawToVoltage, rawToCurrent } from './IcomConstants';
 import { parseTwoByteBcd } from '../utils/bcd';
 import { ConnectionAbortedError, getDisconnectMessage } from '../utils/errors';
+import { rawToSMeter } from '../utils/smeter';
 
 export class IcomControl {
   private ev: RigEventEmitter = new EventEmitter() as RigEventEmitter;
@@ -815,8 +816,21 @@ export class IcomControl {
   }
 
   /**
-   * Read generic level meter (CI-V 0x15/0x02), raw 0-255.
-   * Many rigs return two bytes and the low byte is the level.
+   * Read S-meter (signal strength) level (CI-V 0x15/0x02)
+   * Returns complete reading with S-units, dB, and dBm conversion
+   *
+   * @param options - Query options (timeout)
+   * @returns S-meter reading with physical units, or null if timeout
+   *
+   * @example
+   * ```typescript
+   * const reading = await rig.getLevelMeter();
+   * if (reading) {
+   *   console.log(reading.formatted);  // "S9+10dB"
+   *   console.log(reading.sUnits);     // 9.99
+   *   console.log(reading.dBm);        // -63.08
+   * }
+   * ```
    */
   async getLevelMeter(options?: QueryOptions): Promise<LevelMeterReading | null> {
     const timeoutMs = options?.timeout ?? 3000;
@@ -832,10 +846,10 @@ export class IcomControl {
     const data = resp.subarray(6, resp.length - 1);
     if (data.length === 0) return null;
     const raw = data[data.length - 1] & 0xff; // use low byte as 0-255 level
-    return {
-      raw,
-      percent: (raw / 255) * 100
-    };
+
+    // Convert raw value to S-meter reading with physical units
+    // Uses IC-705 calibration by default (can be extended to support other models)
+    return rawToSMeter(raw, 'IC-705');
   }
 
   /**

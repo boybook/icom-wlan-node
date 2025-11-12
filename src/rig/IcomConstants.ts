@@ -148,6 +148,30 @@ export const METER_CALIBRATION = {
     LOW: { raw: 121, amps: 2.0 },
     /** High current reference: 4A (raw=241) */
     HIGH: { raw: 241, amps: 4.0 }
+  },
+
+  /**
+   * S-meter (CI-V 0x15/0x02) calibration points
+   * Per-model calibration for signal strength meter
+   */
+  SMETER: {
+    /**
+     * IC-705 S-meter calibration (from official CI-V reference manual)
+     * - raw=0 → S0
+     * - raw=120 → S9
+     * - raw=241 → S9+60dB
+     */
+    'IC-705': {
+      /** S0 reference point */
+      S0: 0,
+      /** S9 reference point */
+      S9: 120,
+      /** S9+60dB reference point */
+      S9_PLUS_60DB: 241,
+      /** HF standard: S9 ≈ -73dBm (used for dBm estimation) */
+      HF_S9_DBM: -73
+    }
+    // Future: Add other ICOM models here
   }
 } as const;
 

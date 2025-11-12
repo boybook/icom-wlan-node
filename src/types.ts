@@ -186,14 +186,27 @@ export interface WlanLevelReading {
 }
 
 /**
- * Generic level meter (0-255) reading
- * For CI-V 0x15/0x02 experimental level meter
+ * S-meter (signal strength) level reading
+ * For CI-V 0x15/0x02 command
+ *
+ * Calibration (IC-705):
+ * - raw=0 → S0
+ * - raw=120 → S9
+ * - raw=241 → S9+60dB
  */
 export interface LevelMeterReading {
-  /** Raw 0-255 value */
+  /** Raw 0-255 BCD value */
   raw: number;
   /** Percentage (0-100%) */
   percent: number;
+  /** S-unit value (0-9+), supports decimal (e.g., 4.5 = S4.5) */
+  sUnits: number;
+  /** dB above S9 (only when >S9, e.g., 20 means S9+20dB) */
+  dbAboveS9?: number;
+  /** Estimated absolute power in dBm (based on HF standard S9 ≈ -73dBm) */
+  dBm: number;
+  /** Human-readable formatted string (e.g., "S4", "S9+20dB") */
+  formatted: string;
 }
 
 /**
