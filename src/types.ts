@@ -296,6 +296,26 @@ export interface CurrentReading {
 }
 
 // ============================================================================
+// Antenna Tuner (ATU) Types
+// ============================================================================
+
+/**
+ * Antenna tuner state (IC-705 CI-V 0x1A/0x00)
+ * 00=OFF, 01=ON, 02=TUNING
+ */
+export type TunerState = 'OFF' | 'ON' | 'TUNING';
+
+/**
+ * Antenna tuner status reading
+ */
+export interface TunerStatusReading {
+  /** Raw status code (0x00, 0x01, 0x02) */
+  raw: number;
+  /** Parsed state name */
+  state: TunerState;
+}
+
+// ============================================================================
 // Connection Monitoring Types
 // ============================================================================
 

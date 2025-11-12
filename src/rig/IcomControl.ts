@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 import { CapCapabilitiesPacket, Cmd, ControlPacket, LoginPacket, LoginResponsePacket, RadioCapPacket, Sizes, StatusPacket, TokenPacket, TokenType, ConnInfoPacket, AUDIO_SAMPLE_RATE, XIEGU_TX_BUFFER_SIZE, PingPacket, CivPacket } from '../core/IcomPackets';
 import { dbg, dbgV } from '../utils/debug';
 import { Session } from '../core/Session';
-import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SquelchStatusReading, AudioSquelchReading, OvfStatusReading, PowerLevelReading, CompLevelReading, VoltageReading, CurrentReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics, DisconnectReason, DisconnectOptions } from '../types';
+import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SquelchStatusReading, AudioSquelchReading, OvfStatusReading, PowerLevelReading, CompLevelReading, VoltageReading, CurrentReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics, DisconnectReason, DisconnectOptions, TunerStatusReading, TunerState } from '../types';
 import { IcomCiv } from './IcomCiv';
 import { IcomAudio } from './IcomAudio';
 import { IcomRigCommands } from './IcomRigCommands';
@@ -874,6 +874,53 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const modeCode = typeof mode === 'string' ? getConnectorModeCode(mode) : mode;
     this.sendCiv(IcomRigCommands.setConnectorDataMode(ctrAddr, rigAddr, modeCode));
+  }
+
+  /**
+   * ==============================
+   * Antenna Tuner (ATU) Operations
+   * ==============================
+   */
+
+  /**
+   * Read antenna tuner status (CI-V 0x1A/0x00)
+   * 00=OFF, 01=ON, 02=TUNING
+   */
+  async readTunerStatus(options?: QueryOptions): Promise<TunerStatusReading | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.getTunerStatus(ctrAddr, rigAddr);
+    const resp = await this.waitForCivFrame(
+      (frame) => IcomControl.matchCommandFrame(frame, 0x1a, [0x00], ctrAddr, rigAddr),
+      timeoutMs,
+      () => this.sendCiv(req)
+    );
+    if (!resp) return null;
+    // Expect FE FE [ctr] [rig] 0x1A 0x00 [status] FD
+    const raw = resp.length > 6 ? (resp[6] & 0xff) : undefined;
+    if (raw === undefined) return null;
+    const state: TunerState = raw === 0x00 ? 'OFF' : raw === 0x01 ? 'ON' : raw === 0x02 ? 'TUNING' : 'OFF';
+    return { raw, state };
+  }
+
+  /**
+   * Enable or disable internal antenna tuner (CI-V 0x1A/0x01)
+   * @param enabled true to enable, false to disable
+   */
+  async setTunerEnabled(enabled: boolean): Promise<void> {
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    this.sendCiv(IcomRigCommands.setTunerEnabled(ctrAddr, rigAddr, enabled));
+  }
+
+  /**
+   * Start a manual tuning cycle (same as [TUNE] key) (CI-V 0x1A/0x02/0x00)
+   */
+  async startManualTune(): Promise<void> {
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    this.sendCiv(IcomRigCommands.startManualTune(ctrAddr, rigAddr));
   }
 
   /**

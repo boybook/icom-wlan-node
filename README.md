@@ -117,6 +117,7 @@ await rig.setPtt(false);
   - **Audio TX**: `setPtt(on: boolean)`, `sendAudioFloat32()`, `sendAudioPcm16()`
   - **Rig Control**: `setFrequency()`, `setMode()`, `setConnectorDataMode()`, `setConnectorWLanLevel()`
   - **Rig Query**: `readOperatingFrequency()`, `readOperatingMode()`, `readTransmitFrequency()`, `readTransceiverState()`, `readBandEdges()`
+  - **Antenna Tuner**: `readTunerStatus()`, `setTunerEnabled()`, `startManualTune()`
   - **Meters (RX)**: `readSquelchStatus()`, `readAudioSquelch()`, `readOvfStatus()`, `getLevelMeter()`
   - **Meters (TX)**: `readSWR()`, `readALC()`, `readPowerLevel()`, `readCompLevel()`
   - **Power Supply**: `readVoltage()`, `readCurrent()`
@@ -421,3 +422,29 @@ ICOM_IP=192.168.31.253 ICOM_PORT=50001 ICOM_USER=icom ICOM_PASS=icomicom npm tes
 ## License
 
 MIT
+#### Antenna Tuner (ATU)
+
+- `readTunerStatus(options?: QueryOptions) => Promise<{ raw: number; state: 'OFF'|'ON'|'TUNING' } | null>` — 读取天调状态（CI‑V 0x1A/0x00）
+- `setTunerEnabled(enabled: boolean) => Promise<void>` — 开启/关闭内置天调（CI‑V 0x1A/0x01 00/01）
+- `startManualTune() => Promise<void>` — 触发一次手动调谐（相当于 [TUNE] 键，CI‑V 0x1A/0x02/0x00）
+
+示例：
+
+```ts
+// 读取天调状态
+const atu = await rig.readTunerStatus({ timeout: 2000 });
+if (atu) console.log('ATU:', atu.state); // OFF / ON / TUNING
+
+// 启用内置天调
+await rig.setTunerEnabled(true);
+
+// 触发一次手动调谐
+await rig.startManualTune();
+
+// 可选：轮询状态直到结束
+let status;
+do {
+  await new Promise(r => setTimeout(r, 300));
+  status = await rig.readTunerStatus({ timeout: 1000 });
+} while (status && status.state === 'TUNING');
+```

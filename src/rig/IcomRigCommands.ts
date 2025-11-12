@@ -96,5 +96,21 @@ export const IcomRigCommands = {
   getCurrent(ctrAddr: number, rigAddr: number): Buffer {
     // FE FE [rig] [ctr] 0x15 0x16 FD
     return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x15, 0x16, 0xfd]);
+  },
+
+  // =====================
+  // Antenna Tuner (ATU)
+  // =====================
+  getTunerStatus(ctrAddr: number, rigAddr: number): Buffer {
+    // FE FE [rig] [ctr] 0x1A 0x00 FD
+    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x1a, 0x00, 0xfd]);
+  },
+  setTunerEnabled(ctrAddr: number, rigAddr: number, on: boolean): Buffer {
+    // FE FE [rig] [ctr] 0x1A 0x01 [00|01] FD
+    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x1a, 0x01, on ? 0x01 : 0x00, 0xfd]);
+  },
+  startManualTune(ctrAddr: number, rigAddr: number): Buffer {
+    // FE FE [rig] [ctr] 0x1A 0x02 0x00 FD
+    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x1a, 0x02, 0x00, 0xfd]);
   }
 };
