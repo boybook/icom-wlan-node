@@ -118,6 +118,21 @@ export interface MeterReading {
 }
 
 // ============================================================================
+// Level Reading Type (0x14 series: AF Gain, SQL, RF Power, MIC Gain, NB, NR)
+// ============================================================================
+
+/**
+ * Result of a 0x14 level read operation.
+ * Covers AF Gain, SQL Level, RF Power, MIC Gain, NB Level, NR Level.
+ */
+export interface LevelReading {
+  /** Raw BCD-decoded integer value (0–255) */
+  raw: number;
+  /** Normalized value in range 0.0–1.0 */
+  normalized: number;
+}
+
+// ============================================================================
 // Meter Reading Types
 // ============================================================================
 

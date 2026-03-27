@@ -99,6 +99,29 @@ export const IcomRigCommands = {
   },
 
   // =====================
+  // 0x14 Level Commands (read/write)
+  // =====================
+
+  /**
+   * Build a 0x14 level read query.
+   * Send this to request the current value; the radio responds with the same
+   * command byte + subcmd + 2-byte BCD data.
+   */
+  get0x14Level(ctrAddr: number, rigAddr: number, subcmd: number): Buffer {
+    // FE FE [rig] [ctr] 0x14 [subcmd] FD
+    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x14, subcmd & 0xff, 0xfd]);
+  },
+
+  /**
+   * Build a 0x14 level write command.
+   * @param rawValue - Integer 0-255 (use intToTwoByteBcd to encode)
+   */
+  set0x14Level(ctrAddr: number, rigAddr: number, subcmd: number, bcdHi: number, bcdLo: number): Buffer {
+    // FE FE [rig] [ctr] 0x14 [subcmd] [bcd_hi] [bcd_lo] FD
+    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x14, subcmd & 0xff, bcdHi & 0xff, bcdLo & 0xff, 0xfd]);
+  },
+
+  // =====================
   // Antenna Tuner (ATU)
   // =====================
   getTunerStatus(ctrAddr: number, rigAddr: number): Buffer {

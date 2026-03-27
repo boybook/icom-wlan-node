@@ -2,12 +2,12 @@ import { EventEmitter } from 'events';
 import { CapCapabilitiesPacket, Cmd, ControlPacket, LoginPacket, LoginResponsePacket, RadioCapPacket, Sizes, StatusPacket, TokenPacket, TokenType, ConnInfoPacket, AUDIO_SAMPLE_RATE, XIEGU_TX_BUFFER_SIZE, PingPacket, CivPacket } from '../core/IcomPackets';
 import { dbg, dbgV } from '../utils/debug';
 import { Session } from '../core/Session';
-import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SquelchStatusReading, AudioSquelchReading, OvfStatusReading, PowerLevelReading, CompLevelReading, VoltageReading, CurrentReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics, DisconnectReason, DisconnectOptions, TunerStatusReading, TunerState } from '../types';
+import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SquelchStatusReading, AudioSquelchReading, OvfStatusReading, PowerLevelReading, CompLevelReading, VoltageReading, CurrentReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics, DisconnectReason, DisconnectOptions, TunerStatusReading, TunerState, LevelReading } from '../types';
 import { IcomCiv } from './IcomCiv';
 import { IcomAudio } from './IcomAudio';
 import { IcomRigCommands } from './IcomRigCommands';
 import { getModeCode, getConnectorModeCode, DEFAULT_CONTROLLER_ADDR, METER_THRESHOLDS, METER_TIMER_PERIOD_MS, rawToPowerPercent, rawToVoltage, rawToCurrent } from './IcomConstants';
-import { parseTwoByteBcd } from '../utils/bcd';
+import { parseTwoByteBcd, intToTwoByteBcd } from '../utils/bcd';
 import { ConnectionAbortedError, getDisconnectMessage } from '../utils/errors';
 import { rawToSMeter } from '../utils/smeter';
 
@@ -923,6 +923,82 @@ export class IcomControl {
     this.sendCiv(IcomRigCommands.startManualTune(ctrAddr, rigAddr));
   }
 
+  // ============================================================================
+  // 0x14 Level API — AF Gain, SQL, RF Power, MIC Gain, NB Level, NR Level
+  // ============================================================================
+
+  /** Get AF (audio output) gain. Returns 0.0–1.0, or null on timeout. */
+  async getAFGain(options?: QueryOptions): Promise<LevelReading | null> {
+    const v = await this.read0x14Level(0x01, options);
+    if (v === null) return null;
+    return { raw: Math.round(v * 255), normalized: v };
+  }
+
+  /** Set AF (audio output) gain. Value 0.0–1.0. */
+  setAFGain(value: number): void {
+    this.write0x14Level(0x01, value);
+  }
+
+  /** Get squelch level. Returns 0.0–1.0, or null on timeout. */
+  async getSQL(options?: QueryOptions): Promise<LevelReading | null> {
+    const v = await this.read0x14Level(0x03, options);
+    if (v === null) return null;
+    return { raw: Math.round(v * 255), normalized: v };
+  }
+
+  /** Set squelch level. Value 0.0–1.0. */
+  setSQL(value: number): void {
+    this.write0x14Level(0x03, value);
+  }
+
+  /** Get RF transmit power. Returns 0.0–1.0, or null on timeout. */
+  async getRFPower(options?: QueryOptions): Promise<LevelReading | null> {
+    const v = await this.read0x14Level(0x0a, options);
+    if (v === null) return null;
+    return { raw: Math.round(v * 255), normalized: v };
+  }
+
+  /** Set RF transmit power. Value 0.0–1.0. */
+  setRFPower(value: number): void {
+    this.write0x14Level(0x0a, value);
+  }
+
+  /** Get microphone gain. Returns 0.0–1.0, or null on timeout. */
+  async getMicGain(options?: QueryOptions): Promise<LevelReading | null> {
+    const v = await this.read0x14Level(0x0f, options);
+    if (v === null) return null;
+    return { raw: Math.round(v * 255), normalized: v };
+  }
+
+  /** Set microphone gain. Value 0.0–1.0. */
+  setMicGain(value: number): void {
+    this.write0x14Level(0x0f, value);
+  }
+
+  /** Get noise blanker level. 0.0 = off, >0.0 = on with strength. */
+  async getNBLevel(options?: QueryOptions): Promise<LevelReading | null> {
+    const v = await this.read0x14Level(0x12, options);
+    if (v === null) return null;
+    return { raw: Math.round(v * 255), normalized: v };
+  }
+
+  /** Set noise blanker level. Value 0.0 (off) – 1.0. */
+  setNBLevel(value: number): void {
+    this.write0x14Level(0x12, value);
+  }
+
+  /** Get noise reduction level. 0.0 = off, >0.0 = on with strength. */
+  async getNRLevel(options?: QueryOptions): Promise<LevelReading | null> {
+    const v = await this.read0x14Level(0x13, options);
+    if (v === null) return null;
+    return { raw: Math.round(v * 255), normalized: v };
+  }
+
+  /** Set noise reduction level. Value 0.0 (off) – 1.0. */
+  setNRLevel(value: number): void {
+    this.write0x14Level(0x13, value);
+  }
+
   /**
    * Read squelch status (noise/signal gate state)
    * @param options - Query options (timeout in ms, default 3000)
@@ -1570,6 +1646,50 @@ export class IcomControl {
     if (frame[5] !== (subcmd & 0xff)) return false;
     if (frame[frame.length - 1] !== 0xfd) return false;
     return true;
+  }
+
+  // Strict 0x14 data reply matcher: FE FE [ctr|00] [rig] 0x14 [sub] [bcd_hi] [bcd_lo] FD
+  private static is0x14DataReply(frame: Buffer, subcmd: number, ctrAddr: number, rigAddr: number) {
+    if (!(frame && frame.length >= 9)) return false;
+    if (frame[0] !== 0xfe || frame[1] !== 0xfe) return false;
+    const addrCtrOk = frame[2] === (ctrAddr & 0xff) || frame[2] === 0x00;
+    const addrRigOk = frame[3] === (rigAddr & 0xff);
+    if (!addrCtrOk || !addrRigOk) return false;
+    if (frame[4] !== 0x14) return false;
+    if (frame[5] !== (subcmd & 0xff)) return false;
+    if (frame[frame.length - 1] !== 0xfd) return false;
+    return true;
+  }
+
+  /**
+   * Read a 0x14 level value from the radio.
+   * Returns normalized value 0.0-1.0, or null on timeout/error.
+   */
+  private async read0x14Level(subcmd: number, options?: QueryOptions): Promise<number | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.get0x14Level(ctrAddr, rigAddr, subcmd);
+    const resp = await this.waitForCivFrame(
+      (frame) => IcomControl.is0x14DataReply(frame, subcmd, ctrAddr, rigAddr),
+      timeoutMs,
+      () => this.sendCiv(req)
+    );
+    if (!resp || resp.length < 9) return null;
+    const raw = parseTwoByteBcd(resp.subarray(6, 8));
+    return raw / 255;
+  }
+
+  /**
+   * Write a 0x14 level value to the radio.
+   * @param value - Normalized value 0.0-1.0
+   */
+  private write0x14Level(subcmd: number, value: number): void {
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const raw = Math.max(0, Math.min(255, Math.round(value * 255)));
+    const bcd = intToTwoByteBcd(raw);
+    this.sendCiv(IcomRigCommands.set0x14Level(ctrAddr, rigAddr, subcmd, bcd[0], bcd[1]));
   }
 
   // Start meter polling like Java (every 500ms when PTT is on)
