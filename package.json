@@ -1,6 +1,6 @@
 {
   "name": "icom-wlan-node",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Icom WLAN (CI‑V, audio) protocol implementation for Node.js/TypeScript.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -13,14 +13,24 @@
     "diagnose": "tsx scripts/diagnose.ts",
     "test:scope:real": "tsx scripts/test-scope-real.ts"
   },
-  "keywords": ["icom", "civ", "cat", "udp", "hamradio", "wlan", "audio"],
+  "keywords": [
+    "icom",
+    "civ",
+    "cat",
+    "udp",
+    "hamradio",
+    "wlan",
+    "audio"
+  ],
   "author": "boybook",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/boybook/icom-wlan-node.git"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "devDependencies": {
     "@types/jest": "^29.5.12",
     "@types/node": "^20.10.6",

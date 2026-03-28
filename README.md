@@ -303,12 +303,12 @@ The library exposes common CI‑V operations as friendly methods. Addresses are 
 
 #### Scope / Spectrum
 
-- `scope: IcomScopeService` — 独立的 scope 服务对象，后续可在其他 CI‑V 传输通道复用
-- `enableScope() => Promise<void>` — 发送最小 scope 开启命令序列
-- `disableScope() => Promise<void>` — 发送最小 scope 关闭命令序列
-- `waitForScopeFrame(options?: QueryOptions) => Promise<IcomScopeFrame | null>` — 等待下一帧完整频谱
+- `scope: IcomScopeService` — Standalone scope service object that can be reused with other CI‑V transport paths in the future
+- `enableScope() => Promise<void>` — Send the minimal command sequence to enable basic scope output
+- `disableScope() => Promise<void>` — Send the minimal command sequence to disable scope output
+- `waitForScopeFrame(options?: QueryOptions) => Promise<IcomScopeFrame | null>` — Wait for the next complete scope frame
 
-`IcomScopeFrame` 结构：
+`IcomScopeFrame` shape:
 
 ```ts
 interface IcomScopeFrame {
@@ -326,13 +326,13 @@ interface IcomScopeFrame {
 }
 ```
 
-当前实现说明：
+Current implementation notes:
 
-- 当前只实现基础开关与 `0x27 00 00` 频谱数据采集
-- 解析层与 UDP 会话层解耦，输入只依赖完整 CI‑V frame
-- 当前默认按 `freqLen=5` 解析频率字段
-- 当前未实现 LAN aggregate waterfall 大包拆分；已支持标准 segment 形式
-- `scope` 逻辑可直接复用于未来串口 CI‑V 或 Hamlib CI‑V 封装
+- Currently implements only the basic on/off controls and `0x27 00 00` scope data capture
+- The parsing layer is decoupled from the UDP session layer and only depends on complete CI‑V frames
+- Frequency fields are currently parsed with `freqLen=5` by default
+- LAN aggregate waterfall payload splitting is not implemented yet; standard segment input is supported
+- The `scope` logic is designed to be reusable for future serial CI‑V or Hamlib CI‑V integration
 
 #### Antenna Tuner (ATU)
 
