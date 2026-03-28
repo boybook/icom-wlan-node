@@ -105,6 +105,53 @@ describe('scope support', () => {
     openSpy.mockRestore();
   });
 
+  test('IcomScopeCommands builds scope span read/write commands', () => {
+    expect(IcomScopeCommands.readScopeSpan(DEFAULT_CONTROLLER_ADDR, 0xa4, 0)).toEqual(
+      Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x27, 0x15, 0x00, 0xfd])
+    );
+
+    expect(IcomScopeCommands.setScopeSpan(DEFAULT_CONTROLLER_ADDR, 0xa4, 10000, 0)).toEqual(
+      Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x27, 0x15, 0x00, ...encodeFreq(10000), 0xfd])
+    );
+  });
+
+  test('IcomControl readScopeSpan parses CI-V reply', async () => {
+    const openSpy = jest.spyOn(Session.prototype, 'open').mockImplementation(function mockOpen(this: Session) {
+      return this;
+    });
+
+    const rig = new IcomControl({
+      control: { ip: '127.0.0.1', port: 50001 },
+      userName: 'user',
+      password: 'pass'
+    });
+
+    rig.civ.civAddress = 0xa4;
+    const sent: Buffer[] = [];
+    (rig as any).sendCiv = (buf: Buffer) => {
+      sent.push(Buffer.from(buf));
+      setTimeout(() => {
+        rig.events.emit('civFrame', Buffer.from([
+          0xfe, 0xfe, DEFAULT_CONTROLLER_ADDR, 0xa4, 0x27, 0x15, 0x00,
+          ...encodeFreq(25000),
+          0xfd
+        ]));
+      }, 0);
+    };
+
+    const span = await rig.readScopeSpan({ timeout: 1000, receiver: 0 });
+
+    expect(sent).toEqual([
+      IcomScopeCommands.readScopeSpan(DEFAULT_CONTROLLER_ADDR, 0xa4, 0),
+    ]);
+    expect(span).toEqual({
+      receiver: 0,
+      spanHz: 25000,
+    });
+
+    openSpy.mockRestore();
+  });
+
   test('IcomControl bridges civFrame into scope events', async () => {
     const openSpy = jest.spyOn(Session.prototype, 'open').mockImplementation(function mockOpen(this: Session) {
       return this;

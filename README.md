@@ -306,6 +306,8 @@ The library exposes common CI‑V operations as friendly methods. Addresses are 
 - `scope: IcomScopeService` — Standalone scope service object that can be reused with other CI‑V transport paths in the future
 - `enableScope() => Promise<void>` — Send the minimal command sequence to enable basic scope output
 - `disableScope() => Promise<void>` — Send the minimal command sequence to disable scope output
+- `readScopeSpan(options?: QueryOptions & { receiver?: 0 | 1 }) => Promise<{ receiver: 0 | 1; spanHz: number } | null>` — Read current scope span
+- `setScopeSpan(spanHz: number, options?: { receiver?: 0 | 1 }) => Promise<void>` — Set scope span using CI‑V `0x27 0x15`
 - `waitForScopeFrame(options?: QueryOptions) => Promise<IcomScopeFrame | null>` — Wait for the next complete scope frame
 
 `IcomScopeFrame` shape:
@@ -328,7 +330,7 @@ interface IcomScopeFrame {
 
 Current implementation notes:
 
-- Currently implements only the basic on/off controls and `0x27 00 00` scope data capture
+- Currently implements basic on/off controls, `0x27 0x15` span read/write, and `0x27 00 00` scope data capture
 - The parsing layer is decoupled from the UDP session layer and only depends on complete CI‑V frames
 - Frequency fields are currently parsed with `freqLen=5` by default
 - LAN aggregate waterfall payload splitting is not implemented yet; standard segment input is supported

@@ -133,6 +133,11 @@ export interface IcomScopeFrame {
   transport: IcomScopeTransport;
 }
 
+export interface IcomScopeSpanInfo {
+  receiver: 0 | 1;
+  spanHz: number;
+}
+
 /**
  * Result of a meter reading operation (SWR, ALC, etc.)
  * @deprecated Use specific types like SwrReading, AlcReading instead

@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 import { CapCapabilitiesPacket, Cmd, ControlPacket, LoginPacket, LoginResponsePacket, RadioCapPacket, Sizes, StatusPacket, TokenPacket, TokenType, ConnInfoPacket, AUDIO_SAMPLE_RATE, XIEGU_TX_BUFFER_SIZE, PingPacket, CivPacket } from '../core/IcomPackets';
 import { dbg, dbgV } from '../utils/debug';
 import { Session } from '../core/Session';
-import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SquelchStatusReading, AudioSquelchReading, OvfStatusReading, PowerLevelReading, CompLevelReading, VoltageReading, CurrentReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics, DisconnectReason, DisconnectOptions, TunerStatusReading, TunerState, LevelReading } from '../types';
+import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SquelchStatusReading, AudioSquelchReading, OvfStatusReading, PowerLevelReading, CompLevelReading, VoltageReading, CurrentReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics, DisconnectReason, DisconnectOptions, TunerStatusReading, TunerState, LevelReading, IcomScopeSpanInfo } from '../types';
 import { IcomCiv } from './IcomCiv';
 import { IcomAudio } from './IcomAudio';
 import { IcomRigCommands } from './IcomRigCommands';
@@ -11,6 +11,7 @@ import { parseTwoByteBcd, intToTwoByteBcd } from '../utils/bcd';
 import { ConnectionAbortedError, getDisconnectMessage } from '../utils/errors';
 import { rawToSMeter } from '../utils/smeter';
 import { IcomScopeCommands } from '../scope/IcomScopeCommands';
+import { parseIcomBcdFreqLE } from '../scope/IcomScopeParser';
 import { IcomScopeService } from '../scope/IcomScopeService';
 
 export class IcomControl {
@@ -562,6 +563,36 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     this.sendCiv(IcomScopeCommands.setScopeDataOutput(ctrAddr, rigAddr, false));
     this.sendCiv(IcomScopeCommands.setScopeDisplay(ctrAddr, rigAddr, false));
+  }
+
+  async readScopeSpan(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<IcomScopeSpanInfo | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const receiver = options?.receiver ?? 0;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomScopeCommands.readScopeSpan(ctrAddr, rigAddr, receiver);
+    const resp = await this.waitForCivFrame(
+      (frame) => IcomControl.matchCommandFrame(frame, 0x27, [0x15, receiver], ctrAddr, rigAddr),
+      timeoutMs,
+      () => this.sendCiv(req)
+    );
+
+    if (!resp || resp.length < 13) {
+      return null;
+    }
+
+    const spanHz = parseIcomBcdFreqLE(resp.subarray(7, 12));
+    return {
+      receiver,
+      spanHz,
+    };
+  }
+
+  async setScopeSpan(spanHz: number, options?: { receiver?: 0 | 1 }): Promise<void> {
+    const receiver = options?.receiver ?? 0;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    this.sendCiv(IcomScopeCommands.setScopeSpan(ctrAddr, rigAddr, spanHz, receiver));
   }
 
   async waitForScopeFrame(options?: QueryOptions) {
