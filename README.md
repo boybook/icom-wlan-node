@@ -306,8 +306,18 @@ The library exposes common CI‑V operations as friendly methods. Addresses are 
 - `scope: IcomScopeService` — Standalone scope service object that can be reused with other CI‑V transport paths in the future
 - `enableScope() => Promise<void>` — Send the minimal command sequence to enable basic scope output
 - `disableScope() => Promise<void>` — Send the minimal command sequence to disable scope output
+- `readScopeMode(options?: QueryOptions & { receiver?: 0 | 1 }) => Promise<IcomScopeModeInfo | null>` — Read current scope mode using CI‑V `0x27 0x14`
+- `setScopeMode(mode: IcomScopeMode | 0 | 1 | 2 | 3, options?: { receiver?: 0 | 1 }) => Promise<void>` — Set current scope mode
 - `readScopeSpan(options?: QueryOptions & { receiver?: 0 | 1 }) => Promise<{ receiver: 0 | 1; spanHz: number } | null>` — Read current scope span
 - `setScopeSpan(spanHz: number, options?: { receiver?: 0 | 1 }) => Promise<void>` — Set scope span using CI‑V `0x27 0x15`
+- `readScopeEdge(options?: QueryOptions & { receiver?: 0 | 1 }) => Promise<IcomScopeEdgeInfo | null>` — Read active fixed-edge slot using CI‑V `0x27 0x16`
+- `setScopeEdge(edgeSlot: number, options?: { receiver?: 0 | 1 }) => Promise<void>` — Select active fixed-edge slot
+- `readScopeFixedEdge(rangeId: number, edgeSlot: number, options?: QueryOptions) => Promise<IcomScopeFixedEdgeInfo | null>` — Read fixed-edge frequencies using CI‑V `0x27 0x1E`
+- `setScopeFixedEdge({ rangeId?, edgeSlot?, lowHz, highHz }) => Promise<IcomScopeFixedEdgeInfo>` — Set fixed-edge frequencies, auto-resolving `rangeId` from the current rig frequency when omitted
+- `resolveScopeFrequencyRangeId(frequencyHz?: number) => Promise<number>` — Resolve ICOM fixed-edge range ID from a target or current operating frequency
+- `getSpectrumMode()/setSpectrumMode()` / `getSpectrumSpan()/setSpectrumSpan()` / `getSpectrumEdgeSlot()/setSpectrumEdgeSlot()` / `getSpectrumFixedEdges()/setSpectrumFixedEdges()` — Hamlib-like convenience aliases over the scope-specific methods
+- `getSpectrumDisplayState(options?: QueryOptions & { receiver?: 0 | 1 }) => Promise<IcomSpectrumDisplayState>` — Read a Hamlib-like normalized display state
+- `configureSpectrumDisplay(config?: IcomSpectrumDisplayConfig) => Promise<IcomSpectrumDisplayState>` — Apply a normalized display config covering center/fixed modes
 - `waitForScopeFrame(options?: QueryOptions) => Promise<IcomScopeFrame | null>` — Wait for the next complete scope frame
 
 `IcomScopeFrame` shape:
@@ -521,9 +531,8 @@ ICOM_IP=192.168.31.253 ICOM_PORT=50001 ICOM_USER=icom ICOM_PASS=icomicom npm tes
 - Full token renewal loop and advanced status flag parsing simplified.
 - Audio receive/playback is library‑only; playback is up to the integrator.
 - Robust retransmit/multi‑retransmit handling can be extended.
-- Scope support is currently limited to basic on/off commands plus standard `0x27 00 00` segment parsing.
+- Scope support includes basic enable/disable, mode/span/edge/fixed-edge control, and standard `0x27 00 00` segment parsing.
 - LAN aggregate waterfall payload splitting is not implemented yet.
-- Scope control subcommands beyond basic enable/disable are not implemented yet.
 
 ## License
 

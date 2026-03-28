@@ -115,6 +115,27 @@ describe('scope support', () => {
     );
   });
 
+  test('IcomScopeCommands builds scope mode/edge/fixed-edge commands', () => {
+    expect(IcomScopeCommands.readScopeMode(DEFAULT_CONTROLLER_ADDR, 0xa4, 0)).toEqual(
+      Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x27, 0x14, 0x00, 0xfd])
+    );
+    expect(IcomScopeCommands.setScopeMode(DEFAULT_CONTROLLER_ADDR, 0xa4, 1, 0)).toEqual(
+      Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x27, 0x14, 0x00, 0x01, 0xfd])
+    );
+    expect(IcomScopeCommands.readScopeEdge(DEFAULT_CONTROLLER_ADDR, 0xa4, 0)).toEqual(
+      Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x27, 0x16, 0x00, 0xfd])
+    );
+    expect(IcomScopeCommands.setScopeEdge(DEFAULT_CONTROLLER_ADDR, 0xa4, 2, 0)).toEqual(
+      Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x27, 0x16, 0x00, 0x02, 0xfd])
+    );
+    expect(IcomScopeCommands.readScopeFixedEdge(DEFAULT_CONTROLLER_ADDR, 0xa4, 7, 2)).toEqual(
+      Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x27, 0x1e, 0x07, 0x02, 0xfd])
+    );
+    expect(IcomScopeCommands.setScopeFixedEdge(DEFAULT_CONTROLLER_ADDR, 0xa4, 7, 2, 21074000, 21077000)).toEqual(
+      Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x27, 0x1e, 0x07, 0x02, ...encodeFreq(21074000), ...encodeFreq(21077000), 0xfd])
+    );
+  });
+
   test('IcomControl readScopeSpan parses CI-V reply', async () => {
     const openSpy = jest.spyOn(Session.prototype, 'open').mockImplementation(function mockOpen(this: Session) {
       return this;
@@ -147,6 +168,55 @@ describe('scope support', () => {
     expect(span).toEqual({
       receiver: 0,
       spanHz: 25000,
+    });
+
+    openSpy.mockRestore();
+  });
+
+  test('IcomControl reads scope mode, edge and fixed edge', async () => {
+    const openSpy = jest.spyOn(Session.prototype, 'open').mockImplementation(function mockOpen(this: Session) {
+      return this;
+    });
+
+    const rig = new IcomControl({
+      control: { ip: '127.0.0.1', port: 50001 },
+      userName: 'user',
+      password: 'pass'
+    });
+
+    rig.civ.civAddress = 0xa4;
+    (rig as any).sendCiv = (buf: Buffer) => {
+      const cmd = buf[5];
+      setTimeout(() => {
+        if (cmd === 0x14) {
+          rig.events.emit('civFrame', Buffer.from([0xfe, 0xfe, DEFAULT_CONTROLLER_ADDR, 0xa4, 0x27, 0x14, 0x00, 0x01, 0xfd]));
+        } else if (cmd === 0x16) {
+          rig.events.emit('civFrame', Buffer.from([0xfe, 0xfe, DEFAULT_CONTROLLER_ADDR, 0xa4, 0x27, 0x16, 0x00, 0x02, 0xfd]));
+        } else if (cmd === 0x1e) {
+          rig.events.emit('civFrame', Buffer.from([
+            0xfe, 0xfe, DEFAULT_CONTROLLER_ADDR, 0xa4, 0x27, 0x1e, 0x07, 0x02,
+            ...encodeFreq(21074000),
+            ...encodeFreq(21077000),
+            0xfd
+          ]));
+        }
+      }, 0);
+    };
+
+    await expect(rig.readScopeMode({ timeout: 1000, receiver: 0 })).resolves.toEqual({
+      receiver: 0,
+      mode: 1,
+      modeName: 'fixed',
+    });
+    await expect(rig.readScopeEdge({ timeout: 1000, receiver: 0 })).resolves.toEqual({
+      receiver: 0,
+      edgeSlot: 2,
+    });
+    await expect(rig.readScopeFixedEdge(7, 2, { timeout: 1000 })).resolves.toEqual({
+      rangeId: 7,
+      edgeSlot: 2,
+      lowHz: 21074000,
+      highHz: 21077000,
     });
 
     openSpy.mockRestore();

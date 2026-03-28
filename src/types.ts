@@ -138,6 +138,50 @@ export interface IcomScopeSpanInfo {
   spanHz: number;
 }
 
+export type IcomScopeMode = 'center' | 'fixed' | 'scroll-center' | 'scroll-fixed';
+
+export interface IcomScopeModeInfo {
+  receiver: 0 | 1;
+  mode: 0 | 1 | 2 | 3;
+  modeName: IcomScopeMode;
+}
+
+export interface IcomScopeEdgeInfo {
+  receiver: 0 | 1;
+  edgeSlot: number;
+}
+
+export interface IcomScopeFixedEdgeInfo {
+  rangeId: number;
+  edgeSlot: number;
+  lowHz: number;
+  highHz: number;
+}
+
+export interface IcomSpectrumDisplayState {
+  mode: IcomScopeMode | null;
+  modeCode: 0 | 1 | 2 | 3 | null;
+  spanHz: number | null;
+  edgeSlot: number | null;
+  edgeLowHz: number | null;
+  edgeHighHz: number | null;
+  supportedModes: IcomScopeMode[];
+  supportedSpans: number[];
+  supportedEdgeSlots: number[];
+  supportsFixedEdges: boolean;
+  supportsEdgeSlotSelection: boolean;
+}
+
+export interface IcomSpectrumDisplayConfig {
+  receiver?: 0 | 1;
+  mode?: IcomScopeMode;
+  spanHz?: number;
+  edgeSlot?: number;
+  rangeId?: number;
+  edgeLowHz?: number;
+  edgeHighHz?: number;
+}
+
 /**
  * Result of a meter reading operation (SWR, ALC, etc.)
  * @deprecated Use specific types like SwrReading, AlcReading instead

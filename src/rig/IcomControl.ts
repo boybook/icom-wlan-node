@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 import { CapCapabilitiesPacket, Cmd, ControlPacket, LoginPacket, LoginResponsePacket, RadioCapPacket, Sizes, StatusPacket, TokenPacket, TokenType, ConnInfoPacket, AUDIO_SAMPLE_RATE, XIEGU_TX_BUFFER_SIZE, PingPacket, CivPacket } from '../core/IcomPackets';
 import { dbg, dbgV } from '../utils/debug';
 import { Session } from '../core/Session';
-import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SquelchStatusReading, AudioSquelchReading, OvfStatusReading, PowerLevelReading, CompLevelReading, VoltageReading, CurrentReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics, DisconnectReason, DisconnectOptions, TunerStatusReading, TunerState, LevelReading, IcomScopeSpanInfo } from '../types';
+import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SquelchStatusReading, AudioSquelchReading, OvfStatusReading, PowerLevelReading, CompLevelReading, VoltageReading, CurrentReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics, DisconnectReason, DisconnectOptions, TunerStatusReading, TunerState, LevelReading, IcomScopeSpanInfo, IcomScopeMode, IcomScopeModeInfo, IcomScopeEdgeInfo, IcomScopeFixedEdgeInfo, IcomSpectrumDisplayState, IcomSpectrumDisplayConfig } from '../types';
 import { IcomCiv } from './IcomCiv';
 import { IcomAudio } from './IcomAudio';
 import { IcomRigCommands } from './IcomRigCommands';
@@ -13,6 +13,46 @@ import { rawToSMeter } from '../utils/smeter';
 import { IcomScopeCommands } from '../scope/IcomScopeCommands';
 import { parseIcomBcdFreqLE } from '../scope/IcomScopeParser';
 import { IcomScopeService } from '../scope/IcomScopeService';
+
+const DEFAULT_SCOPE_EDGE_SLOTS = [1, 2, 3, 4] as const;
+const DEFAULT_SCOPE_SPANS_HZ = [25000000, 10000000, 5000000, 2500000, 1000000, 500000, 250000, 100000, 50000, 25000, 10000, 5000, 2500] as const;
+const DEFAULT_SCOPE_FREQUENCY_RANGES = [
+  { rangeId: 1, lowHz: 30000, highHz: 1600000 },
+  { rangeId: 2, lowHz: 1600000, highHz: 2000000 },
+  { rangeId: 3, lowHz: 2000000, highHz: 6000000 },
+  { rangeId: 4, lowHz: 6000000, highHz: 8000000 },
+  { rangeId: 5, lowHz: 8000000, highHz: 11000000 },
+  { rangeId: 6, lowHz: 11000000, highHz: 15000000 },
+  { rangeId: 7, lowHz: 15000000, highHz: 20000000 },
+  { rangeId: 8, lowHz: 20000000, highHz: 22000000 },
+  { rangeId: 9, lowHz: 22000000, highHz: 26000000 },
+  { rangeId: 10, lowHz: 26000000, highHz: 30000000 },
+  { rangeId: 11, lowHz: 30000000, highHz: 45000000 },
+  { rangeId: 12, lowHz: 45000000, highHz: 60000000 },
+  { rangeId: 13, lowHz: 60000000, highHz: 74800000 },
+  { rangeId: 14, lowHz: 74800000, highHz: 108000000 },
+  { rangeId: 15, lowHz: 108000000, highHz: 137000000 },
+  { rangeId: 16, lowHz: 137000000, highHz: 200000000 },
+  { rangeId: 17, lowHz: 400000000, highHz: 470000000 },
+];
+
+function modeCodeToName(mode: 0 | 1 | 2 | 3): IcomScopeMode {
+  switch (mode) {
+    case 0: return 'center';
+    case 1: return 'fixed';
+    case 2: return 'scroll-center';
+    case 3: return 'scroll-fixed';
+  }
+}
+
+function modeNameToCode(mode: IcomScopeMode): 0 | 1 | 2 | 3 {
+  switch (mode) {
+    case 'center': return 0;
+    case 'fixed': return 1;
+    case 'scroll-center': return 2;
+    case 'scroll-fixed': return 3;
+  }
+}
 
 export class IcomControl {
   private ev: RigEventEmitter = new EventEmitter() as RigEventEmitter;
@@ -593,6 +633,216 @@ export class IcomControl {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
     this.sendCiv(IcomScopeCommands.setScopeSpan(ctrAddr, rigAddr, spanHz, receiver));
+  }
+
+  async readScopeMode(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<IcomScopeModeInfo | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const receiver = options?.receiver ?? 0;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomScopeCommands.readScopeMode(ctrAddr, rigAddr, receiver);
+    const resp = await this.waitForCivFrame(
+      (frame) => IcomControl.matchCommandFrame(frame, 0x27, [0x14, receiver], ctrAddr, rigAddr),
+      timeoutMs,
+      () => this.sendCiv(req)
+    );
+
+    if (!resp || resp.length < 9) {
+      return null;
+    }
+
+    const mode = resp[7] as 0 | 1 | 2 | 3;
+    return {
+      receiver,
+      mode,
+      modeName: modeCodeToName(mode),
+    };
+  }
+
+  async setScopeMode(mode: IcomScopeMode | 0 | 1 | 2 | 3, options?: { receiver?: 0 | 1 }): Promise<void> {
+    const receiver = options?.receiver ?? 0;
+    const modeCode = typeof mode === 'string' ? modeNameToCode(mode) : mode;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    this.sendCiv(IcomScopeCommands.setScopeMode(ctrAddr, rigAddr, modeCode, receiver));
+  }
+
+  async readScopeEdge(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<IcomScopeEdgeInfo | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const receiver = options?.receiver ?? 0;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomScopeCommands.readScopeEdge(ctrAddr, rigAddr, receiver);
+    const resp = await this.waitForCivFrame(
+      (frame) => IcomControl.matchCommandFrame(frame, 0x27, [0x16, receiver], ctrAddr, rigAddr),
+      timeoutMs,
+      () => this.sendCiv(req)
+    );
+
+    if (!resp || resp.length < 9) {
+      return null;
+    }
+
+    return {
+      receiver,
+      edgeSlot: resp[7],
+    };
+  }
+
+  async setScopeEdge(edgeSlot: number, options?: { receiver?: 0 | 1 }): Promise<void> {
+    const receiver = options?.receiver ?? 0;
+    const safeEdgeSlot = Math.max(1, Math.min(4, Math.trunc(edgeSlot)));
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    this.sendCiv(IcomScopeCommands.setScopeEdge(ctrAddr, rigAddr, safeEdgeSlot, receiver));
+  }
+
+  async readScopeFixedEdge(rangeId: number, edgeSlot: number, options?: QueryOptions): Promise<IcomScopeFixedEdgeInfo | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomScopeCommands.readScopeFixedEdge(ctrAddr, rigAddr, rangeId, edgeSlot);
+    const resp = await this.waitForCivFrame(
+      (frame) => IcomControl.matchCommandFrame(frame, 0x27, [0x1e, rangeId, edgeSlot], ctrAddr, rigAddr),
+      timeoutMs,
+      () => this.sendCiv(req)
+    );
+
+    if (!resp || resp.length < 18) {
+      return null;
+    }
+
+    return {
+      rangeId,
+      edgeSlot,
+      lowHz: parseIcomBcdFreqLE(resp.subarray(8, 13)),
+      highHz: parseIcomBcdFreqLE(resp.subarray(13, 18)),
+    };
+  }
+
+  async setScopeFixedEdge(options: { rangeId?: number; edgeSlot?: number; lowHz: number; highHz: number }): Promise<IcomScopeFixedEdgeInfo> {
+    const rangeId = options.rangeId ?? await this.resolveScopeFrequencyRangeId();
+    const edgeInfo = options.edgeSlot
+      ? { edgeSlot: options.edgeSlot }
+      : await this.readScopeEdge({ receiver: 0, timeout: 3000 });
+    const edgeSlot = edgeInfo?.edgeSlot ?? 1;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    this.sendCiv(IcomScopeCommands.setScopeFixedEdge(ctrAddr, rigAddr, rangeId, edgeSlot, options.lowHz, options.highHz));
+    return {
+      rangeId,
+      edgeSlot,
+      lowHz: options.lowHz,
+      highHz: options.highHz,
+    };
+  }
+
+  async resolveScopeFrequencyRangeId(frequencyHz?: number): Promise<number> {
+    const targetFrequency = frequencyHz ?? await this.readOperatingFrequency({ timeout: 3000 });
+    if (!targetFrequency) {
+      throw new Error('Unable to resolve scope frequency range without operating frequency');
+    }
+    const matched = DEFAULT_SCOPE_FREQUENCY_RANGES.find((range) => targetFrequency >= range.lowHz && targetFrequency < range.highHz);
+    if (!matched) {
+      throw new Error(`No scope frequency range matches ${targetFrequency} Hz`);
+    }
+    return matched.rangeId;
+  }
+
+  getScopeSupportedEdgeSlots(): number[] {
+    return [...DEFAULT_SCOPE_EDGE_SLOTS];
+  }
+
+  async getSpectrumDisplayState(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<IcomSpectrumDisplayState> {
+    const receiver = options?.receiver ?? 0;
+    const [modeInfo, spanInfo, edgeInfo] = await Promise.all([
+      this.readScopeMode({ ...options, receiver }),
+      this.readScopeSpan({ ...options, receiver }),
+      this.readScopeEdge({ ...options, receiver }),
+    ]);
+    let fixedEdgeInfo: IcomScopeFixedEdgeInfo | null = null;
+    if (modeInfo?.modeName === 'fixed' || modeInfo?.modeName === 'scroll-fixed') {
+      try {
+        const rangeId = await this.resolveScopeFrequencyRangeId();
+        fixedEdgeInfo = await this.readScopeFixedEdge(rangeId, edgeInfo?.edgeSlot ?? 1, options);
+      } catch (_) {
+        fixedEdgeInfo = null;
+      }
+    }
+
+    return {
+      mode: modeInfo?.modeName ?? null,
+      modeCode: modeInfo?.mode ?? null,
+      spanHz: spanInfo?.spanHz ?? (fixedEdgeInfo ? fixedEdgeInfo.highHz - fixedEdgeInfo.lowHz : null),
+      edgeSlot: edgeInfo?.edgeSlot ?? null,
+      edgeLowHz: fixedEdgeInfo?.lowHz ?? null,
+      edgeHighHz: fixedEdgeInfo?.highHz ?? null,
+      supportedModes: ['center', 'fixed', 'scroll-center', 'scroll-fixed'],
+      supportedSpans: [...DEFAULT_SCOPE_SPANS_HZ],
+      supportedEdgeSlots: this.getScopeSupportedEdgeSlots(),
+      supportsFixedEdges: true,
+      supportsEdgeSlotSelection: true,
+    };
+  }
+
+  async configureSpectrumDisplay(config: IcomSpectrumDisplayConfig = {}): Promise<IcomSpectrumDisplayState> {
+    const receiver = config.receiver ?? 0;
+    if (config.mode !== undefined) {
+      await this.setScopeMode(config.mode, { receiver });
+    }
+    if (config.edgeSlot !== undefined) {
+      await this.setScopeEdge(config.edgeSlot, { receiver });
+    }
+    if (config.spanHz !== undefined && (!config.mode || config.mode === 'center' || config.mode === 'scroll-center')) {
+      await this.setScopeSpan(config.spanHz, { receiver });
+    }
+    if (config.edgeLowHz !== undefined && config.edgeHighHz !== undefined && (!config.mode || config.mode === 'fixed' || config.mode === 'scroll-fixed')) {
+      await this.setScopeFixedEdge({
+        rangeId: config.rangeId,
+        edgeSlot: config.edgeSlot,
+        lowHz: config.edgeLowHz,
+        highHz: config.edgeHighHz,
+      });
+    }
+    return this.getSpectrumDisplayState({ receiver, timeout: 3000 });
+  }
+
+  async getSpectrumMode(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<IcomScopeMode | null> {
+    return (await this.readScopeMode(options))?.modeName ?? null;
+  }
+
+  async setSpectrumMode(mode: IcomScopeMode, options?: { receiver?: 0 | 1 }): Promise<void> {
+    await this.setScopeMode(mode, options);
+  }
+
+  async getSpectrumSpan(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<number | null> {
+    return (await this.readScopeSpan(options))?.spanHz ?? null;
+  }
+
+  async setSpectrumSpan(spanHz: number, options?: { receiver?: 0 | 1 }): Promise<void> {
+    await this.setScopeSpan(spanHz, options);
+  }
+
+  async getSpectrumEdgeSlot(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<number | null> {
+    return (await this.readScopeEdge(options))?.edgeSlot ?? null;
+  }
+
+  async setSpectrumEdgeSlot(edgeSlot: number, options?: { receiver?: 0 | 1 }): Promise<void> {
+    await this.setScopeEdge(edgeSlot, options);
+  }
+
+  async getSpectrumFixedEdges(options?: QueryOptions & { receiver?: 0 | 1; rangeId?: number; edgeSlot?: number }): Promise<{ lowHz: number; highHz: number; rangeId: number; edgeSlot: number } | null> {
+    const rangeId = options?.rangeId ?? await this.resolveScopeFrequencyRangeId();
+    const edgeSlot = options?.edgeSlot ?? await this.getSpectrumEdgeSlot(options) ?? 1;
+    const info = await this.readScopeFixedEdge(rangeId, edgeSlot, options);
+    if (!info) {
+      return null;
+    }
+    return info;
+  }
+
+  async setSpectrumFixedEdges(options: { rangeId?: number; edgeSlot?: number; lowHz: number; highHz: number }): Promise<{ lowHz: number; highHz: number; rangeId: number; edgeSlot: number }> {
+    return this.setScopeFixedEdge(options);
   }
 
   async waitForScopeFrame(options?: QueryOptions) {
