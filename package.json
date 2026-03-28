@@ -10,7 +10,8 @@
     "test": "jest",
     "prepublishOnly": "npm run build",
     "lint": "eslint .",
-    "diagnose": "tsx scripts/diagnose.ts"
+    "diagnose": "tsx scripts/diagnose.ts",
+    "test:scope:real": "tsx scripts/test-scope-real.ts"
   },
   "keywords": ["icom", "civ", "cat", "udp", "hamradio", "wlan", "audio"],
   "author": "boybook",

@@ -47,6 +47,8 @@ export interface IcomRigEvents {
   civ: (data: Buffer) => void;
   // Emitted for each complete CI-V frame (FE FE ... FD) extracted from CIV payload stream
   civFrame: (frame: Buffer) => void;
+  scopeSegment: (segment: IcomScopeSegmentInfo) => void;
+  scopeFrame: (frame: IcomScopeFrame) => void;
   audio: (frame: AudioFrame) => void;
   error: (err: Error) => void;
   // Connection monitoring events
@@ -100,6 +102,35 @@ export interface QueryOptions {
    * Timeout in milliseconds (default: 3000)
    */
   timeout?: number;
+}
+
+export type IcomScopeTransport = 'lan-civ' | 'serial';
+
+export interface IcomScopeSegmentInfo {
+  receiver: 0 | 1;
+  sequence: number;
+  sequenceMax: number;
+  mode?: 0 | 1 | 2 | 3;
+  outOfRange?: boolean;
+  startFreqHz?: number;
+  endFreqHz?: number;
+  pixels?: Uint8Array;
+  rawCivPayload: Buffer;
+  transport: IcomScopeTransport;
+}
+
+export interface IcomScopeFrame {
+  valid: boolean;
+  receiver: 0 | 1;
+  sequence: number;
+  sequenceMax: number;
+  mode: 0 | 1 | 2 | 3;
+  outOfRange: boolean;
+  startFreqHz: number;
+  endFreqHz: number;
+  pixels: Uint8Array;
+  rawCivPayloads: Buffer[];
+  transport: IcomScopeTransport;
 }
 
 /**

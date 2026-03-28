@@ -10,6 +10,8 @@ import { getModeCode, getConnectorModeCode, DEFAULT_CONTROLLER_ADDR, METER_THRES
 import { parseTwoByteBcd, intToTwoByteBcd } from '../utils/bcd';
 import { ConnectionAbortedError, getDisconnectMessage } from '../utils/errors';
 import { rawToSMeter } from '../utils/smeter';
+import { IcomScopeCommands } from '../scope/IcomScopeCommands';
+import { IcomScopeService } from '../scope/IcomScopeService';
 
 export class IcomControl {
   private ev: RigEventEmitter = new EventEmitter() as RigEventEmitter;
@@ -18,6 +20,7 @@ export class IcomControl {
   private audioSess: Session;
   public civ: IcomCiv;
   public audio: IcomAudio;
+  public scope: IcomScopeService;
   private options: IcomRigOptions;
   private rigName = '';
   private macAddress: Buffer = Buffer.alloc(6);
@@ -80,6 +83,9 @@ export class IcomControl {
 
     this.civ = new IcomCiv(this.civSess);
     this.audio = new IcomAudio(this.audioSess);
+    this.scope = new IcomScopeService();
+    this.scope.on('scopeSegment', (segment) => this.ev.emit('scopeSegment', segment));
+    this.scope.on('scopeFrame', (frame) => this.ev.emit('scopeFrame', frame));
   }
 
   get events(): RigEventEmitter { return this.ev; }
@@ -543,6 +549,25 @@ export class IcomControl {
   }
 
   sendCiv(data: Buffer) { this.civ.sendCivData(data); }
+
+  async enableScope(): Promise<void> {
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    this.sendCiv(IcomScopeCommands.setScopeDisplay(ctrAddr, rigAddr, true));
+    this.sendCiv(IcomScopeCommands.setScopeDataOutput(ctrAddr, rigAddr, true));
+  }
+
+  async disableScope(): Promise<void> {
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    this.sendCiv(IcomScopeCommands.setScopeDataOutput(ctrAddr, rigAddr, false));
+    this.sendCiv(IcomScopeCommands.setScopeDisplay(ctrAddr, rigAddr, false));
+  }
+
+  async waitForScopeFrame(options?: QueryOptions) {
+    const timeoutMs = options?.timeout ?? 3000;
+    return this.scope.waitForScopeFrame(timeoutMs);
+  }
 
   /**
    * Set PTT (Push-To-Talk) state
@@ -1609,6 +1634,7 @@ export class IcomControl {
       this.civAssembleBuf = this.civAssembleBuf.subarray(end + 1);
       // Emit event
       this.ev.emit('civFrame', frame);
+      this.scope.handleCivFrame(frame, 'lan-civ');
       // Continue loop in case multiple frames are in buffer
     }
   }

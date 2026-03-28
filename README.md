@@ -4,6 +4,7 @@ Icom WLAN (UDP) protocol implementation in Node.js + TypeScript, featuring:
 
 - Control channel handshake (AreYouThere/AreYouReady), login (0x80/0x60), token confirm/renew (0x40)
 - CI‑V over UDP encapsulation (open/close keep‑alive + CIV frame transport)
+- Scope/spectrum data capture over CI‑V `0x27`, with automatic segment assembly into friendly frame events
 - Audio stream send/receive (LPCM 16‑bit mono @ 12 kHz; 20 ms frames)
 - Typed, event‑based API; designed for use as a dependency in other Node projects
 
@@ -63,6 +64,15 @@ rig.events.on('audio', (frame) => {
   // frame.pcm16 is raw 16‑bit PCM mono @ 12 kHz
 });
 
+rig.events.on('scopeFrame', (frame) => {
+  console.log(
+    'Scope:',
+    `${frame.startFreqHz}..${frame.endFreqHz} Hz`,
+    `pixels=${frame.pixels.length}`,
+    `mode=${frame.mode}`
+  );
+});
+
 rig.events.on('error', (err) => console.error('UDP error', err));
 
 (async () => {
@@ -93,6 +103,37 @@ rig.sendAudioFloat32(tone, true);
 await rig.setPtt(false);
 ```
 
+### Scope / Spectrum
+
+```ts
+await rig.connect();
+
+rig.events.on('scopeSegment', (segment) => {
+  console.log(`scope segment ${segment.sequence}/${segment.sequenceMax}`);
+});
+
+rig.events.on('scopeFrame', (frame) => {
+  console.log('scope frame ready', {
+    startFreqHz: frame.startFreqHz,
+    endFreqHz: frame.endFreqHz,
+    pixelCount: frame.pixels.length,
+    outOfRange: frame.outOfRange
+  });
+});
+
+// Enable basic scope output
+await rig.enableScope();
+
+// Wait for one complete frame
+const frame = await rig.waitForScopeFrame({ timeout: 3000 });
+if (frame) {
+  console.log(frame.pixels[0], frame.pixels[1]);
+}
+
+// Disable scope output when finished
+await rig.disableScope();
+```
+
 ## API Overview
 
 - `new IcomControl(options)`
@@ -104,6 +145,8 @@ await rig.setPtt(false);
   - `capabilities(CapabilitiesInfo)` — civ address, audio name (0xA8)
   - `civ(Buffer)` — raw CI‑V payload bytes as transported over UDP
   - `civFrame(Buffer)` — one complete CI‑V frame (FE FE ... FD)
+  - `scopeSegment(IcomScopeSegmentInfo)` — one parsed `0x27` scope segment
+  - `scopeFrame(IcomScopeFrame)` — one assembled spectrum/waterfall frame
   - `audio({ pcm16: Buffer })` — audio frames
   - `error(Error)` — UDP errors
   - `connectionLost(ConnectionLostInfo)` — session timeout detected
@@ -114,6 +157,7 @@ await rig.setPtt(false);
   - **Connection**: `connect()` / `disconnect(options?)` — connects control + CIV + audio sub‑sessions; resolves when all ready
     - `disconnect()` accepts optional `DisconnectOptions` or `DisconnectReason` for better error handling
   - **Raw CI‑V**: `sendCiv(buf: Buffer)` — send a raw CI‑V frame
+  - **Scope / Spectrum**: `scope`, `enableScope()`, `disableScope()`, `waitForScopeFrame()`
   - **Audio TX**: `setPtt(on: boolean)`, `sendAudioFloat32()`, `sendAudioPcm16()`
   - **Rig Control**: `setFrequency()`, `setMode()`, `setConnectorDataMode()`, `setConnectorWLanLevel()`
   - **Rig Query**: `readOperatingFrequency()`, `readOperatingMode()`, `readTransmitFrequency()`, `readTransceiverState()`, `readBandEdges()`
@@ -257,6 +301,45 @@ The library exposes common CI‑V operations as friendly methods. Addresses are 
 - `readTransceiverState(options?: QueryOptions) => Promise<'TX' | 'RX' | 'UNKNOWN' | null>`
 - `readBandEdges(options?: QueryOptions) => Promise<Buffer|null>`
 
+#### Scope / Spectrum
+
+- `scope: IcomScopeService` — 独立的 scope 服务对象，后续可在其他 CI‑V 传输通道复用
+- `enableScope() => Promise<void>` — 发送最小 scope 开启命令序列
+- `disableScope() => Promise<void>` — 发送最小 scope 关闭命令序列
+- `waitForScopeFrame(options?: QueryOptions) => Promise<IcomScopeFrame | null>` — 等待下一帧完整频谱
+
+`IcomScopeFrame` 结构：
+
+```ts
+interface IcomScopeFrame {
+  valid: boolean;
+  receiver: 0 | 1;
+  sequence: number;
+  sequenceMax: number;
+  mode: 0 | 1 | 2 | 3;
+  outOfRange: boolean;
+  startFreqHz: number;
+  endFreqHz: number;
+  pixels: Uint8Array;
+  rawCivPayloads: Buffer[];
+  transport: 'lan-civ' | 'serial';
+}
+```
+
+当前实现说明：
+
+- 当前只实现基础开关与 `0x27 00 00` 频谱数据采集
+- 解析层与 UDP 会话层解耦，输入只依赖完整 CI‑V frame
+- 当前默认按 `freqLen=5` 解析频率字段
+- 当前未实现 LAN aggregate waterfall 大包拆分；已支持标准 segment 形式
+- `scope` 逻辑可直接复用于未来串口 CI‑V 或 Hamlib CI‑V 封装
+
+#### Antenna Tuner (ATU)
+
+- `readTunerStatus(options?: QueryOptions) => Promise<{ raw: number; state: 'OFF'|'ON'|'TUNING' } | null>` — Read tuner status (CI‑V 0x1A/0x00)
+- `setTunerEnabled(enabled: boolean) => Promise<void>` — Enable/disable internal tuner (CI‑V 0x1A/0x01)
+- `startManualTune() => Promise<void>` — Trigger one manual tune cycle (CI‑V 0x1A/0x02/0x00)
+
 #### Meters & Levels
 
 **Reception Meters** (available anytime):
@@ -383,6 +466,23 @@ await rig.setConnectorDataMode('WLAN');
 // Or numeric: await rig.setConnectorDataMode(0x03);
 
 await rig.setConnectorWLanLevel(120); // Set WLAN audio level
+
+// Scope capture
+await rig.enableScope();
+const scope = await rig.waitForScopeFrame({ timeout: 3000 });
+if (scope) {
+  console.log(`Scope ${scope.startFreqHz}..${scope.endFreqHz}, ${scope.pixels.length} pixels`);
+}
+await rig.disableScope();
+
+// Antenna tuner
+const atu = await rig.readTunerStatus({ timeout: 2000 });
+if (atu) {
+  console.log('ATU:', atu.state);
+}
+
+await rig.setTunerEnabled(true);
+await rig.startManualTune();
 ```
 
 ## Design Notes
@@ -393,6 +493,7 @@ await rig.setConnectorWLanLevel(120); // Set WLAN audio level
 - Credentials use the same simple substitution cipher as FT8CN’s Android client (`passCode`).
 - The 0x90/0x50 handshake strictly follows FT8CN’s timing and endianness. We pre‑open local CIV/Audio sockets, reply with local ports on first 0x90, then set remote ports upon 0x50.
 - CIV/audio sub‑sessions each run their own Ping/Idle and (for CIV) OpenClose keep‑alive.
+- Scope data is treated as CI‑V business payload, not as a separate UDP stream. `IcomControl` only bridges CI‑V frames into the reusable `IcomScopeService`.
 
 ### Endianness and parsing tips
 
@@ -418,33 +519,10 @@ ICOM_IP=192.168.31.253 ICOM_PORT=50001 ICOM_USER=icom ICOM_PASS=icomicom npm tes
 - Full token renewal loop and advanced status flag parsing simplified.
 - Audio receive/playback is library‑only; playback is up to the integrator.
 - Robust retransmit/multi‑retransmit handling can be extended.
+- Scope support is currently limited to basic on/off commands plus standard `0x27 00 00` segment parsing.
+- LAN aggregate waterfall payload splitting is not implemented yet.
+- Scope control subcommands beyond basic enable/disable are not implemented yet.
 
 ## License
 
 MIT
-#### Antenna Tuner (ATU)
-
-- `readTunerStatus(options?: QueryOptions) => Promise<{ raw: number; state: 'OFF'|'ON'|'TUNING' } | null>` — 读取天调状态（CI‑V 0x1A/0x00）
-- `setTunerEnabled(enabled: boolean) => Promise<void>` — 开启/关闭内置天调（CI‑V 0x1A/0x01 00/01）
-- `startManualTune() => Promise<void>` — 触发一次手动调谐（相当于 [TUNE] 键，CI‑V 0x1A/0x02/0x00）
-
-示例：
-
-```ts
-// 读取天调状态
-const atu = await rig.readTunerStatus({ timeout: 2000 });
-if (atu) console.log('ATU:', atu.state); // OFF / ON / TUNING
-
-// 启用内置天调
-await rig.setTunerEnabled(true);
-
-// 触发一次手动调谐
-await rig.startManualTune();
-
-// 可选：轮询状态直到结束
-let status;
-do {
-  await new Promise(r => setTimeout(r, 300));
-  status = await rig.readTunerStatus({ timeout: 1000 });
-} while (status && status.state === 'TUNING');
-```

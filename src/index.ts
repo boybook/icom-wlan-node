@@ -3,6 +3,8 @@ export * from './types';
 
 // Export main class
 export { IcomControl } from './rig/IcomControl';
+export { IcomScopeService } from './scope/IcomScopeService';
+export { IcomScopeCommands } from './scope/IcomScopeCommands';
 
 // Export constants and enums
 export {
