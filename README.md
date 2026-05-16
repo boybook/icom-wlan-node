@@ -2,6 +2,8 @@
 
 Icom WLAN (UDP) protocol implementation in Node.js + TypeScript, featuring:
 
+CI-V profile support is Hamlib-aligned for modern ICOM radios: WLAN UDP packets carry standard CI-V frames, with model-specific profiles for IC-705, IC-905, IC-7300, IC-9700, IC-7610, and IC-7760.
+
 - Control channel handshake (AreYouThere/AreYouReady), login (0x80/0x60), token confirm/renew (0x40)
 - CI‑V over UDP encapsulation (open/close keep‑alive + CIV frame transport)
 - Scope/spectrum data capture over CI‑V `0x27`, with automatic segment assembly into friendly frame events
@@ -35,7 +37,8 @@ import { IcomControl, AUDIO_RATE, DisconnectReason } from 'icom-wlan-node';
 const rig = new IcomControl({
   control: { ip: '192.168.1.50', port: 50001 },
   userName: 'user',
-  password: 'pass'
+  password: 'pass',
+  model: 'auto' // or force a profile, e.g. 'IC-705'
 });
 
 rig.events.on('login', (res) => {
@@ -48,7 +51,7 @@ rig.events.on('status', (s) => {
 });
 
 rig.events.on('capabilities', (c) => {
-  console.log('CIV address:', c.civAddress, 'audio:', c.audioName);
+  console.log('CIV address:', c.civAddress, 'audio:', c.audioName, 'profile:', c.profileName);
 });
 
 rig.events.on('civ', (bytes) => {
@@ -86,6 +89,42 @@ rig.events.on('error', (err) => console.error('UDP error', err));
 // Send an already built CI‑V frame
 rig.sendCiv(Buffer.from([0xfe,0xfe,0xa4,0xe0,0x03,0xfd]));
 ```
+
+### Main Rig Control Usage
+
+Modern ICOM LAN/WLAN radios still transport standard serial CI‑V frames inside the UDP CIV payload. `icom-wlan-node` selects a model profile automatically from the radio name or CI‑V address, or you can force one with `model`.
+
+```ts
+const rig = new IcomControl({
+  control: { ip: '192.168.1.50', port: 50001 },
+  userName: 'icom',
+  password: 'icomicom',
+  model: 'auto' // 'IC-705', 'IC-905', 'IC-7300', 'IC-9700', 'IC-7610', 'IC-7760'
+});
+
+await rig.connect();
+
+// Frequency and mode are profile-aware:
+// modern profiles use CI-V 0x25/0x26, legacy fallback uses 0x05/0x06.
+await rig.setFrequency(14074000);
+await rig.setMode('USB', { dataMode: true, filter: 1 }); // USB-D, filter 1
+
+const freqHz = await rig.readOperatingFrequency();
+const mode = await rig.readOperatingMode();
+const tx = await rig.readPtt();
+console.log({ freqHz, mode, state: tx ? 'TX' : 'RX' });
+
+// Tuner uses Hamlib-aligned CI-V 0x1C/0x01.
+const tuner = await rig.readTunerStatus();
+await rig.setTunerEnabled(true);
+
+// Meters use active-profile calibration tables.
+const swr = await rig.readSWR();
+const power = await rig.readPowerLevel();
+console.log({ tuner, swr, watts: power?.watts, powerPercent: power?.percent });
+```
+
+Profile-specific behavior includes IC-905 6-byte frequency BCD above 5.85 GHz, model-specific scope fixed-edge ranges, and calibrated SWR/ALC/RF power/COMP/voltage/current meters. Private connector commands such as WLAN level or connector data mode are only enabled when the active profile declares the vendor extension; unsupported writes throw `UnsupportedCommandError`.
 
 ### PTT and Audio TX
 
@@ -136,7 +175,7 @@ await rig.disableScope();
 
 ## API Overview
 
-- `new IcomControl(options)`
+- `new IcomControl(options)` — `options.model` may be `'auto'` or a supported model profile such as `'IC-705'`, `'IC-905'`, `'IC-7300'`, `'IC-9700'`, `'IC-7610'`, or `'IC-7760'`
   - `options.control`: `{ ip, port }` radio control UDP endpoint
   - `options.userName`, `options.password`
 - Events (`rig.events.on(...)`)
@@ -160,12 +199,12 @@ await rig.disableScope();
   - **Scope / Spectrum**: `scope`, `enableScope()`, `disableScope()`, `waitForScopeFrame()`
   - **Audio TX**: `setPtt(on: boolean)`, `sendAudioFloat32()`, `sendAudioPcm16()`
   - **Rig Control**: `setFrequency()`, `setMode()`, `setConnectorDataMode()`, `setConnectorWLanLevel()`
-  - **Rig Query**: `readOperatingFrequency()`, `readOperatingMode()`, `readTransmitFrequency()`, `readTransceiverState()`, `readBandEdges()`
+  - **Rig Query**: `readOperatingFrequency()`, `readOperatingMode()`, `readTransmitFrequency()`, `readPtt()`, `readTransceiverState()`, `readBandEdges()`
   - **Antenna Tuner**: `readTunerStatus()`, `setTunerEnabled()`, `startManualTune()`
   - **Meters (RX)**: `readSquelchStatus()`, `readAudioSquelch()`, `readOvfStatus()`, `getLevelMeter()`
   - **Meters (TX)**: `readSWR()`, `readALC()`, `readPowerLevel()`, `readCompLevel()`
   - **Power Supply**: `readVoltage()`, `readCurrent()`
-  - **Audio Config**: `getConnectorWLanLevel()`
+  - **Audio Config**: `getUsbAfLevel()`, `setUsbAfLevel()`, `getConnectorWLanLevel()`
   - **Connection Monitoring**: `getConnectionPhase()`, `getConnectionMetrics()`, `getConnectionState()`, `isAnySessionDisconnected()`, `configureMonitoring()`
 
 ### Connection Management & Auto-Reconnect
@@ -285,8 +324,8 @@ The library exposes common CI‑V operations as friendly methods. Addresses are 
 
 #### Rig Control
 
-- `setFrequency(hz: number)` — Set operating frequency in Hz
-- `setMode(mode: IcomMode | number, options?: { dataMode?: boolean })` — Set mode (supports string or numeric code)
+- `setFrequency(hz: number)` — Set operating frequency in Hz; modern profiles use targetable CI-V `0x25`, and IC-905 uses 6-byte BCD above 5.85 GHz
+- `setMode(mode: IcomMode | number, options?: { dataMode?: boolean; filter?: 1|2|3 })` — Set mode; modern profiles use CI-V `0x26` with VFO, data-mode and filter
 - `setPtt(on: boolean)` — Key/unkey transmitter
 
 **Supported Modes** (IcomMode string constants):
@@ -296,8 +335,9 @@ The library exposes common CI‑V operations as friendly methods. Addresses are 
 #### Rig Query
 
 - `readOperatingFrequency(options?: QueryOptions) => Promise<number|null>`
-- `readOperatingMode(options?: QueryOptions) => Promise<{ mode: number; filter?: number; modeName?: string; filterName?: string } | null>`
+- `readOperatingMode(options?: QueryOptions) => Promise<{ mode: number; filter?: number; modeName?: string; filterName?: string; dataMode?: boolean } | null>`
 - `readTransmitFrequency(options?: QueryOptions) => Promise<number|null>`
+- `readPtt(options?: QueryOptions) => Promise<boolean|null>`
 - `readTransceiverState(options?: QueryOptions) => Promise<'TX' | 'RX' | 'UNKNOWN' | null>`
 - `readBandEdges(options?: QueryOptions) => Promise<Buffer|null>`
 
@@ -309,7 +349,7 @@ The library exposes common CI‑V operations as friendly methods. Addresses are 
 - `readScopeMode(options?: QueryOptions & { receiver?: 0 | 1 }) => Promise<IcomScopeModeInfo | null>` — Read current scope mode using CI‑V `0x27 0x14`
 - `setScopeMode(mode: IcomScopeMode | 0 | 1 | 2 | 3, options?: { receiver?: 0 | 1 }) => Promise<void>` — Set current scope mode
 - `readScopeSpan(options?: QueryOptions & { receiver?: 0 | 1 }) => Promise<{ receiver: 0 | 1; spanHz: number } | null>` — Read current scope span
-- `setScopeSpan(spanHz: number, options?: { receiver?: 0 | 1 }) => Promise<void>` — Set scope span using CI‑V `0x27 0x15`
+- `setScopeSpan(spanHz: number, options?: { receiver?: 0 | 1 }) => Promise<void>` — Set public scope span using CI‑V `0x27 0x15`; the wire value is `spanHz / 2` per Hamlib
 - `readScopeEdge(options?: QueryOptions & { receiver?: 0 | 1 }) => Promise<IcomScopeEdgeInfo | null>` — Read active fixed-edge slot using CI‑V `0x27 0x16`
 - `setScopeEdge(edgeSlot: number, options?: { receiver?: 0 | 1 }) => Promise<void>` — Select active fixed-edge slot
 - `readScopeFixedEdge(rangeId: number, edgeSlot: number, options?: QueryOptions) => Promise<IcomScopeFixedEdgeInfo | null>` — Read fixed-edge frequencies using CI‑V `0x27 0x1E`
@@ -340,17 +380,17 @@ interface IcomScopeFrame {
 
 Current implementation notes:
 
-- Currently implements basic on/off controls, `0x27 0x15` span read/write, and `0x27 00 00` scope data capture
+- Implements basic on/off controls, `0x27 0x15` span read/write, fixed-edge selection/ranges, and `0x27 00 00` scope data capture
 - The parsing layer is decoupled from the UDP session layer and only depends on complete CI‑V frames
-- Frequency fields are currently parsed with `freqLen=5` by default
+- Frequency and fixed-edge ranges are profile-aware; unsupported model-specific variants should be added in `src/rig/IcomProfiles.ts`
 - LAN aggregate waterfall payload splitting is not implemented yet; standard segment input is supported
 - The `scope` logic is designed to be reusable for future serial CI‑V or Hamlib CI‑V integration
 
 #### Antenna Tuner (ATU)
 
-- `readTunerStatus(options?: QueryOptions) => Promise<{ raw: number; state: 'OFF'|'ON'|'TUNING' } | null>` — Read tuner status (CI‑V 0x1A/0x00)
-- `setTunerEnabled(enabled: boolean) => Promise<void>` — Enable/disable internal tuner (CI‑V 0x1A/0x01)
-- `startManualTune() => Promise<void>` — Trigger one manual tune cycle (CI‑V 0x1A/0x02/0x00)
+- `readTunerStatus(options?: QueryOptions) => Promise<{ raw: number; state: 'OFF'|'ON'|'TUNING' } | null>` — Read tuner status (Hamlib-aligned CI-V `0x1C 0x01`)
+- `setTunerEnabled(enabled: boolean) => Promise<void>` — Enable/disable internal tuner (Hamlib-aligned CI‑V `0x1C 0x01 0x00/0x01`)
+- `startManualTune() => Promise<void>` — Trigger one manual tune cycle (Hamlib-aligned CI‑V `0x1C 0x01 0x02`)
 
 #### Meters & Levels
 
@@ -363,20 +403,20 @@ Current implementation notes:
 **Transmission Meters** (require PTT on):
 - `readSWR(options?: QueryOptions) => Promise<{ raw: number; swr: number; alert: boolean } | null>` — SWR meter (CI-V 0x15/0x12)
 - `readALC(options?: QueryOptions) => Promise<{ raw: number; percent: number; alert: boolean } | null>` — ALC meter (CI-V 0x15/0x13)
-- `readPowerLevel(options?: QueryOptions) => Promise<{ raw: number; percent: number } | null>` — Output power level (CI-V 0x15/0x11)
-- `readCompLevel(options?: QueryOptions) => Promise<{ raw: number; percent: number } | null>` — Voice compression level (CI-V 0x15/0x14)
+- `readPowerLevel(options?: QueryOptions) => Promise<{ raw: number; percent: number; watts?: number } | null>` — Output power level (CI-V 0x15/0x11)
+- `readCompLevel(options?: QueryOptions) => Promise<{ raw: number; percent: number; db?: number } | null>` — Voice compression level (CI-V 0x15/0x14)
 
 **Power Supply Monitoring**:
 - `readVoltage(options?: QueryOptions) => Promise<{ raw: number; volts: number } | null>` — Supply voltage (CI-V 0x15/0x15)
 - `readCurrent(options?: QueryOptions) => Promise<{ raw: number; amps: number } | null>` — Supply current draw (CI-V 0x15/0x16)
 
 **Audio Configuration**:
-- `getConnectorWLanLevel(options?: QueryOptions) => Promise<{ raw: number; percent: number } | null>` — Get WLAN audio level (CI-V 0x1A/0x05/0x01/0x17)
-- `setConnectorWLanLevel(level: number)` — Set WLAN audio level (0-255)
+- `getUsbAfLevel(options?: QueryOptions) => Promise<{ raw: number; percent: number } | null>` / `setUsbAfLevel(level: number)` — Hamlib-aligned USB AF level when the active profile declares it
+- `getConnectorWLanLevel(options?: QueryOptions) => Promise<{ raw: number; percent: number } | null>` / `setConnectorWLanLevel(level: number)` — Private `icom-wlan-node` WLAN level extension; returns `null` or throws `UnsupportedCommandError` when the active profile does not declare it
 
 #### Connector Settings
 
-- `setConnectorDataMode(mode: ConnectorDataMode | number)` — Set data routing mode (supports string or numeric)
+- `setConnectorDataMode(mode: ConnectorDataMode | number)` — Private connector routing extension; supported only on profiles that declare the vendor command
 
 **Supported Connector Modes** (ConnectorDataMode string constants):
 - `'MIC'` (0x00), `'ACC'` (0x01), `'USB'` (0x02), `'WLAN'` (0x03)
@@ -457,17 +497,17 @@ if (alc) {
 
 const power = await rig.readPowerLevel({ timeout: 2000 });
 if (power) {
-  console.log(`Power: ${power.percent.toFixed(1)}%`);
+  console.log(`Power: ${power.percent.toFixed(1)}%${power.watts != null ? ` (${power.watts.toFixed(1)} W)` : ''}`);
 }
 
 const comp = await rig.readCompLevel({ timeout: 2000 });
 if (comp) {
-  console.log(`COMP: ${comp.percent.toFixed(1)}%`);
+  console.log(`COMP: ${comp.percent.toFixed(1)}%${comp.db != null ? ` (${comp.db.toFixed(1)} dB)` : ''}`);
 }
 
 await rig.setPtt(false);
 
-// Configure WLAN connector
+// Configure WLAN connector (private extension; profile-gated)
 const wlanLevel = await rig.getConnectorWLanLevel({ timeout: 2000 });
 if (wlanLevel) {
   console.log(`WLAN Level: ${wlanLevel.percent.toFixed(1)}%`);

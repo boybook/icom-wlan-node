@@ -1,0 +1,61 @@
+/** Hamlib-aligned CI-V command and subcommand constants. */
+export const CIV = {
+  PR: 0xfe,
+  FI: 0xfd,
+  ACK: 0xfb,
+  NAK: 0xfa,
+  CTRLID: 0xe0,
+
+  C_RD_BAND: 0x02,
+  C_RD_FREQ: 0x03,
+  C_RD_MODE: 0x04,
+  C_SET_FREQ: 0x05,
+  C_SET_MODE: 0x06,
+  C_CTL_LVL: 0x14,
+  C_RD_SQSM: 0x15,
+  C_CTL_FUNC: 0x16,
+  C_CTL_MEM: 0x1a,
+  C_CTL_PTT: 0x1c,
+  C_SEND_SEL_FREQ: 0x25,
+  C_SEND_SEL_MODE: 0x26,
+  C_CTL_SCP: 0x27,
+
+  S_PTT: 0x00,
+  S_ANT_TUN: 0x01,
+  S_RD_TX_FREQ: 0x03,
+
+  S_MEM_PARM: 0x05,
+  S_MEM_DATA_MODE: 0x06,
+
+  S_LVL_AF: 0x01,
+  S_LVL_RF: 0x02,
+  S_LVL_SQL: 0x03,
+  S_LVL_NR: 0x06,
+  S_LVL_RFPOWER: 0x0a,
+  S_LVL_MICGAIN: 0x0b,
+  S_LVL_COMP: 0x0e,
+  S_LVL_BKINDL: 0x0f,
+  S_LVL_NB: 0x12,
+  S_LVL_DIGI: 0x13,
+
+  S_SQL: 0x01,
+  S_SML: 0x02,
+  S_CSQL: 0x05,
+  S_OVF: 0x07,
+  S_RFML: 0x11,
+  S_SWR: 0x12,
+  S_ALC: 0x13,
+  S_CMP: 0x14,
+  S_VD: 0x15,
+  S_ID: 0x16,
+
+  S_SCP_DAT: 0x00,
+  S_SCP_STS: 0x10,
+  S_SCP_DOP: 0x11,
+  S_SCP_MOD: 0x14,
+  S_SCP_SPN: 0x15,
+  S_SCP_EDG: 0x16,
+  S_SCP_FEF: 0x1e,
+} as const;
+
+export const ICOM_MODE_FILTER_DEFAULT = 1 as const;

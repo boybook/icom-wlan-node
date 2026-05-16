@@ -1,139 +1,131 @@
-// Helpers to build CI-V frames for common operations (PTT, mode, frequency)
+import { encodeBcdBE, encodeFrequencyBcdLE, buildCivFrame } from './IcomCivFrame';
+import { CIV, ICOM_MODE_FILTER_DEFAULT } from './IcomCivSpec';
 
+// Helpers to build standard CI-V frames for common rig operations.
 export const IcomRigCommands = {
-  // FE FE [rigAddr] [ctrAddr] 1C 00 [01|00] FD
   setPTT(ctrAddr: number, rigAddr: number, on: boolean): Buffer {
-    return Buffer.from([
-      0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x1c, 0x00, on ? 0x01 : 0x00, 0xfd
-    ]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_PTT, subcmd: CIV.S_PTT, payload: [on ? 0x01 : 0x00] });
   },
-  setMode(ctrAddr: number, rigAddr: number, mode: number): Buffer {
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x06, mode & 0xff, 0x01, 0xfd]);
+
+  readPTT(ctrAddr: number, rigAddr: number): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_PTT, subcmd: CIV.S_PTT });
   },
-  setFrequency(ctrAddr: number, rigAddr: number, hz: number): Buffer {
-    // 05: BCD format, little-endian nibbles per Java logic
-    const bcd = (n: number) => (((n / 10) | 0) << 4) + (n % 10);
-    const d0 = bcd(Math.floor(hz % 100));
-    const d1 = bcd(Math.floor((hz % 10000) / 100));
-    const d2 = bcd(Math.floor((hz % 1000000) / 10000));
-    const d3 = bcd(Math.floor((hz % 100000000) / 1000000));
-    const d4 = bcd(Math.floor(hz / 100000000));  // Fixed: was /1000000000
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x05, d0, d1, d2, d3, d4, 0xfd]);
-  }
-  ,
+
+  setMode(ctrAddr: number, rigAddr: number, mode: number, filter: 1 | 2 | 3 = ICOM_MODE_FILTER_DEFAULT): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_SET_MODE, subcmd: mode & 0xff, payload: [filter & 0xff] });
+  },
+
+  setSelectedMode(ctrAddr: number, rigAddr: number, mode: number, dataMode: boolean = false, filter: 1 | 2 | 3 = ICOM_MODE_FILTER_DEFAULT, vfoNumber: 0 | 1 = 0): Buffer {
+    return buildCivFrame({
+      rigAddr,
+      ctrlAddr: ctrAddr,
+      cmd: CIV.C_SEND_SEL_MODE,
+      subcmd: vfoNumber,
+      payload: [mode & 0xff, dataMode ? 0x01 : 0x00, filter & 0xff],
+    });
+  },
+
+  setFrequency(ctrAddr: number, rigAddr: number, hz: number, bcdBytes: number = 5): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_SET_FREQ, payload: encodeFrequencyBcdLE(hz, bcdBytes) });
+  },
+
+  setSelectedFrequency(ctrAddr: number, rigAddr: number, hz: number, bcdBytes: number = 5, vfoNumber: 0 | 1 = 0): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_SEND_SEL_FREQ, subcmd: vfoNumber, payload: encodeFrequencyBcdLE(hz, bcdBytes) });
+  },
+
   readOperatingFrequency(ctrAddr: number, rigAddr: number): Buffer {
-    // FE FE [rigAddr] [ctrAddr] 0x03 FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x03, 0xfd]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_RD_FREQ });
   },
+
+  readSelectedFrequency(ctrAddr: number, rigAddr: number, vfoNumber: 0 | 1 = 0): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_SEND_SEL_FREQ, subcmd: vfoNumber });
+  },
+
   readOperatingMode(ctrAddr: number, rigAddr: number): Buffer {
-    // FE FE [rig] [ctr] 0x04 FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x04, 0xfd]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_RD_MODE });
   },
+
+  readSelectedMode(ctrAddr: number, rigAddr: number, vfoNumber: 0 | 1 = 0): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_SEND_SEL_MODE, subcmd: vfoNumber });
+  },
+
   readTransmitFrequency(ctrAddr: number, rigAddr: number): Buffer {
-    // FE FE [rig] [ctr] 0x1C 0x03 FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x1c, 0x03, 0xfd]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_PTT, subcmd: CIV.S_RD_TX_FREQ });
   },
+
   readTransceiverState(ctrAddr: number, rigAddr: number): Buffer {
-    // FE FE [rig] [ctr] 0x1A 0x00 0x48 FD (not recommended by Java, but available)
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x1a, 0x00, 0x48, 0xfd]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_MEM, subcmd: [0x00, 0x48] });
   },
+
   readBandEdges(ctrAddr: number, rigAddr: number): Buffer {
-    // FE FE [rig] [ctr] 0x02 FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x02, 0xfd]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_RD_BAND });
   },
-  setOperationDataMode(ctrAddr: number, rigAddr: number, mode: number): Buffer {
-    // FE FE [rig] [ctr] 0x26 0x00 [mode] 0x01 0x01 FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x26, 0x00, mode & 0xff, 0x01, 0x01, 0xfd]);
+
+  setOperationDataMode(ctrAddr: number, rigAddr: number, mode: number, filter: 1 | 2 | 3 = ICOM_MODE_FILTER_DEFAULT): Buffer {
+    return IcomRigCommands.setSelectedMode(ctrAddr, rigAddr, mode, true, filter, 0);
   },
+
   getSWRState(ctrAddr: number, rigAddr: number): Buffer {
-    // FE FE [rig] [ctr] 0x15 0x12 FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x15, 0x12, 0xfd]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_RD_SQSM, subcmd: CIV.S_SWR });
   },
   getALCState(ctrAddr: number, rigAddr: number): Buffer {
-    // FE FE [rig] [ctr] 0x15 0x13 FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x15, 0x13, 0xfd]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_RD_SQSM, subcmd: CIV.S_ALC });
   },
   getLevelMeter(ctrAddr: number, rigAddr: number): Buffer {
-    // FE FE [rig] [ctr] 0x15 0x02 FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x15, 0x02, 0xfd]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_RD_SQSM, subcmd: CIV.S_SML });
   },
-  getConnectorWLanLevel(ctrAddr: number, rigAddr: number): Buffer {
-    // FE FE [rig] [ctr] 0x1A 0x05 0x01 0x17 FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x1a, 0x05, 0x01, 0x17, 0xfd]);
+  getConnectorWLanLevel(ctrAddr: number, rigAddr: number, subext: number[] = [0x01, 0x17]): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_MEM, subcmd: CIV.S_MEM_PARM, payload: subext });
   },
-  setConnectorWLanLevel(ctrAddr: number, rigAddr: number, level: number): Buffer {
-    // FE FE [rig] [ctr] 0x1A 0x05 0x01 0x17 [level_hi] [level_lo] FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x1a, 0x05, 0x01, 0x17, (level >> 8) & 0xff, level & 0xff, 0xfd]);
+  setConnectorWLanLevel(ctrAddr: number, rigAddr: number, level: number, subext: number[] = [0x01, 0x17]): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_MEM, subcmd: CIV.S_MEM_PARM, payload: [...subext, ...encodeBcdBE(level, 2)] });
   },
-  setConnectorDataMode(ctrAddr: number, rigAddr: number, mode: number): Buffer {
-    // FE FE [rig] [ctr] 0x1A 0x05 0x01 0x19 [mode] FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x1a, 0x05, 0x01, 0x19, mode & 0xff, 0xfd]);
+  setConnectorDataMode(ctrAddr: number, rigAddr: number, mode: number, subext: number[] = [0x01, 0x19]): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_MEM, subcmd: CIV.S_MEM_PARM, payload: [...subext, mode & 0xff] });
+  },
+  getUsbAfLevel(ctrAddr: number, rigAddr: number, subext: number[] = [0x01, 0x13]): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_MEM, subcmd: CIV.S_MEM_PARM, payload: subext });
+  },
+  setUsbAfLevel(ctrAddr: number, rigAddr: number, level: number, subext: number[] = [0x01, 0x13]): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_MEM, subcmd: CIV.S_MEM_PARM, payload: [...subext, ...encodeBcdBE(level, 2)] });
   },
   getSquelchStatus(ctrAddr: number, rigAddr: number): Buffer {
-    // FE FE [rig] [ctr] 0x15 0x01 FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x15, 0x01, 0xfd]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_RD_SQSM, subcmd: CIV.S_SQL });
   },
   getAudioSquelch(ctrAddr: number, rigAddr: number): Buffer {
-    // FE FE [rig] [ctr] 0x15 0x05 FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x15, 0x05, 0xfd]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_RD_SQSM, subcmd: CIV.S_CSQL });
   },
   getOvfStatus(ctrAddr: number, rigAddr: number): Buffer {
-    // FE FE [rig] [ctr] 0x15 0x07 FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x15, 0x07, 0xfd]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_RD_SQSM, subcmd: CIV.S_OVF });
   },
   getPowerLevel(ctrAddr: number, rigAddr: number): Buffer {
-    // FE FE [rig] [ctr] 0x15 0x11 FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x15, 0x11, 0xfd]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_RD_SQSM, subcmd: CIV.S_RFML });
   },
   getCompLevel(ctrAddr: number, rigAddr: number): Buffer {
-    // FE FE [rig] [ctr] 0x15 0x14 FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x15, 0x14, 0xfd]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_RD_SQSM, subcmd: CIV.S_CMP });
   },
   getVoltage(ctrAddr: number, rigAddr: number): Buffer {
-    // FE FE [rig] [ctr] 0x15 0x15 FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x15, 0x15, 0xfd]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_RD_SQSM, subcmd: CIV.S_VD });
   },
   getCurrent(ctrAddr: number, rigAddr: number): Buffer {
-    // FE FE [rig] [ctr] 0x15 0x16 FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x15, 0x16, 0xfd]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_RD_SQSM, subcmd: CIV.S_ID });
   },
 
-  // =====================
-  // 0x14 Level Commands (read/write)
-  // =====================
-
-  /**
-   * Build a 0x14 level read query.
-   * Send this to request the current value; the radio responds with the same
-   * command byte + subcmd + 2-byte BCD data.
-   */
   get0x14Level(ctrAddr: number, rigAddr: number, subcmd: number): Buffer {
-    // FE FE [rig] [ctr] 0x14 [subcmd] FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x14, subcmd & 0xff, 0xfd]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_LVL, subcmd });
   },
 
-  /**
-   * Build a 0x14 level write command.
-   * @param rawValue - Integer 0-255 (use intToTwoByteBcd to encode)
-   */
   set0x14Level(ctrAddr: number, rigAddr: number, subcmd: number, bcdHi: number, bcdLo: number): Buffer {
-    // FE FE [rig] [ctr] 0x14 [subcmd] [bcd_hi] [bcd_lo] FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x14, subcmd & 0xff, bcdHi & 0xff, bcdLo & 0xff, 0xfd]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_LVL, subcmd, payload: [bcdHi, bcdLo] });
   },
 
-  // =====================
-  // Antenna Tuner (ATU)
-  // =====================
   getTunerStatus(ctrAddr: number, rigAddr: number): Buffer {
-    // FE FE [rig] [ctr] 0x1A 0x00 FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x1a, 0x00, 0xfd]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_PTT, subcmd: CIV.S_ANT_TUN });
   },
   setTunerEnabled(ctrAddr: number, rigAddr: number, on: boolean): Buffer {
-    // FE FE [rig] [ctr] 0x1A 0x01 [00|01] FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x1a, 0x01, on ? 0x01 : 0x00, 0xfd]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_PTT, subcmd: CIV.S_ANT_TUN, payload: [on ? 0x01 : 0x00] });
   },
   startManualTune(ctrAddr: number, rigAddr: number): Buffer {
-    // FE FE [rig] [ctr] 0x1A 0x02 0x00 FD
-    return Buffer.from([0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x1a, 0x02, 0x00, 0xfd]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_PTT, subcmd: CIV.S_ANT_TUN, payload: [0x02] });
   }
 };

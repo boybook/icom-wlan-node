@@ -111,7 +111,7 @@ describe('scope support', () => {
     );
 
     expect(IcomScopeCommands.setScopeSpan(DEFAULT_CONTROLLER_ADDR, 0xa4, 10000, 0)).toEqual(
-      Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x27, 0x15, 0x00, ...encodeFreq(10000), 0xfd])
+      Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x27, 0x15, 0x00, ...encodeFreq(5000), 0xfd])
     );
   });
 
@@ -154,7 +154,7 @@ describe('scope support', () => {
       setTimeout(() => {
         rig.events.emit('civFrame', Buffer.from([
           0xfe, 0xfe, DEFAULT_CONTROLLER_ADDR, 0xa4, 0x27, 0x15, 0x00,
-          ...encodeFreq(25000),
+          ...encodeFreq(5000),
           0xfd
         ]));
       }, 0);
@@ -167,7 +167,7 @@ describe('scope support', () => {
     ]);
     expect(span).toEqual({
       receiver: 0,
-      spanHz: 25000,
+      spanHz: 10000,
     });
 
     openSpy.mockRestore();

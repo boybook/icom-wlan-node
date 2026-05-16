@@ -2,39 +2,22 @@ import { EventEmitter } from 'events';
 import { CapCapabilitiesPacket, Cmd, ControlPacket, LoginPacket, LoginResponsePacket, RadioCapPacket, Sizes, StatusPacket, TokenPacket, TokenType, ConnInfoPacket, AUDIO_SAMPLE_RATE, XIEGU_TX_BUFFER_SIZE, PingPacket, CivPacket } from '../core/IcomPackets';
 import { dbg, dbgV } from '../utils/debug';
 import { Session } from '../core/Session';
-import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SquelchStatusReading, AudioSquelchReading, OvfStatusReading, PowerLevelReading, CompLevelReading, VoltageReading, CurrentReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics, DisconnectReason, DisconnectOptions, TunerStatusReading, TunerState, LevelReading, IcomScopeSpanInfo, IcomScopeMode, IcomScopeModeInfo, IcomScopeEdgeInfo, IcomScopeFixedEdgeInfo, IcomSpectrumDisplayState, IcomSpectrumDisplayConfig } from '../types';
+import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SquelchStatusReading, AudioSquelchReading, OvfStatusReading, PowerLevelReading, CompLevelReading, VoltageReading, CurrentReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics, DisconnectReason, DisconnectOptions, TunerStatusReading, TunerState, LevelReading, IcomScopeSpanInfo, IcomScopeMode, IcomScopeModeInfo, IcomScopeEdgeInfo, IcomScopeFixedEdgeInfo, IcomSpectrumDisplayState, IcomSpectrumDisplayConfig, IcomModelId } from '../types';
 import { IcomCiv } from './IcomCiv';
 import { IcomAudio } from './IcomAudio';
 import { IcomRigCommands } from './IcomRigCommands';
-import { getModeCode, getConnectorModeCode, DEFAULT_CONTROLLER_ADDR, METER_THRESHOLDS, METER_TIMER_PERIOD_MS, rawToPowerPercent, rawToVoltage, rawToCurrent } from './IcomConstants';
+import { getModeCode, getConnectorModeCode, DEFAULT_CONTROLLER_ADDR, METER_THRESHOLDS, METER_TIMER_PERIOD_MS } from './IcomConstants';
 import { parseTwoByteBcd, intToTwoByteBcd } from '../utils/bcd';
-import { ConnectionAbortedError, getDisconnectMessage } from '../utils/errors';
+import { ConnectionAbortedError, getDisconnectMessage, UnsupportedCommandError } from '../utils/errors';
 import { rawToSMeter } from '../utils/smeter';
 import { IcomScopeCommands } from '../scope/IcomScopeCommands';
 import { parseIcomBcdFreqLE } from '../scope/IcomScopeParser';
 import { IcomScopeService } from '../scope/IcomScopeService';
+import { decodeBcdBE, decodeFrequencyBcdLE } from './IcomCivFrame';
+import { CIV } from './IcomCivSpec';
+import { IcomProfile, getProfileByModel, interpolateCalibration, resolveIcomProfile } from './IcomProfiles';
 
-const DEFAULT_SCOPE_EDGE_SLOTS = [1, 2, 3, 4] as const;
 const DEFAULT_SCOPE_SPANS_HZ = [25000000, 10000000, 5000000, 2500000, 1000000, 500000, 250000, 100000, 50000, 25000, 10000, 5000, 2500] as const;
-const DEFAULT_SCOPE_FREQUENCY_RANGES = [
-  { rangeId: 1, lowHz: 30000, highHz: 1600000 },
-  { rangeId: 2, lowHz: 1600000, highHz: 2000000 },
-  { rangeId: 3, lowHz: 2000000, highHz: 6000000 },
-  { rangeId: 4, lowHz: 6000000, highHz: 8000000 },
-  { rangeId: 5, lowHz: 8000000, highHz: 11000000 },
-  { rangeId: 6, lowHz: 11000000, highHz: 15000000 },
-  { rangeId: 7, lowHz: 15000000, highHz: 20000000 },
-  { rangeId: 8, lowHz: 20000000, highHz: 22000000 },
-  { rangeId: 9, lowHz: 22000000, highHz: 26000000 },
-  { rangeId: 10, lowHz: 26000000, highHz: 30000000 },
-  { rangeId: 11, lowHz: 30000000, highHz: 45000000 },
-  { rangeId: 12, lowHz: 45000000, highHz: 60000000 },
-  { rangeId: 13, lowHz: 60000000, highHz: 74800000 },
-  { rangeId: 14, lowHz: 74800000, highHz: 108000000 },
-  { rangeId: 15, lowHz: 108000000, highHz: 137000000 },
-  { rangeId: 16, lowHz: 137000000, highHz: 200000000 },
-  { rangeId: 17, lowHz: 400000000, highHz: 470000000 },
-];
 
 function modeCodeToName(mode: 0 | 1 | 2 | 3): IcomScopeMode {
   switch (mode) {
@@ -68,6 +51,8 @@ export class IcomControl {
   private tokenTimer?: NodeJS.Timeout;
   private civAssembleBuf: Buffer = Buffer.alloc(0); // CIV stream reassembler
   private meterTimer?: NodeJS.Timeout;
+  private activeProfile: IcomProfile = getProfileByModel('generic-modern-icom');
+  private lastFilter: 1 | 2 | 3 = 1;
 
   // Connection state machine (replaces old fragmented state flags)
   private connectionSession: ConnectionSession = {
@@ -97,7 +82,8 @@ export class IcomControl {
   };
 
   constructor(options: IcomRigOptions) {
-    this.options = options;
+    this.options = { ...options, model: options.model ?? 'auto' };
+    this.activeProfile = resolveIcomProfile({ requestedModel: this.options.model });
 
     // Setup control session
     this.sess = new Session({ ip: options.control.ip, port: options.control.port }, {
@@ -130,6 +116,29 @@ export class IcomControl {
   }
 
   get events(): RigEventEmitter { return this.ev; }
+
+  get profile(): IcomProfile { return this.activeProfile; }
+
+  private resolveActiveProfile(context: { rigName?: string; civAddress?: number } = {}) {
+    const next = resolveIcomProfile({
+      requestedModel: this.options.model,
+      rigName: context.rigName ?? this.rigName,
+      civAddress: context.civAddress ?? this.civ.civAddress,
+    });
+    if (this.options.model && this.options.model !== 'auto' && context.civAddress !== undefined && next.defaultCivAddress !== (context.civAddress & 0xff)) {
+      dbg(`Configured profile ${next.modelId} default CI-V 0x${next.defaultCivAddress.toString(16)} differs from radio CI-V 0x${(context.civAddress & 0xff).toString(16)}`);
+    }
+    if (next.modelId !== this.activeProfile.modelId) {
+      dbg(`ICOM profile selected: ${next.profileName}`);
+    }
+    this.activeProfile = next;
+    this.lastFilter = next.defaultFilter;
+  }
+
+  private getProfileModelId(): IcomModelId {
+    return this.activeProfile.modelId;
+  }
+
 
   // ============================================================================
   // State Machine Management
@@ -621,10 +630,10 @@ export class IcomControl {
       return null;
     }
 
-    const spanHz = parseIcomBcdFreqLE(resp.subarray(7, 12));
+    const encodedSpanHz = parseIcomBcdFreqLE(resp.subarray(7, 12));
     return {
       receiver,
-      spanHz,
+      spanHz: encodedSpanHz * 2,
     };
   }
 
@@ -691,7 +700,9 @@ export class IcomControl {
 
   async setScopeEdge(edgeSlot: number, options?: { receiver?: 0 | 1 }): Promise<void> {
     const receiver = options?.receiver ?? 0;
-    const safeEdgeSlot = Math.max(1, Math.min(4, Math.trunc(edgeSlot)));
+    const slots = this.activeProfile.scopeEdgeSlots;
+    const maxSlot = slots.length ? Math.max(...slots) : 4;
+    const safeEdgeSlot = Math.max(1, Math.min(maxSlot, Math.trunc(edgeSlot)));
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
     this.sendCiv(IcomScopeCommands.setScopeEdge(ctrAddr, rigAddr, safeEdgeSlot, receiver));
@@ -742,7 +753,7 @@ export class IcomControl {
     if (!targetFrequency) {
       throw new Error('Unable to resolve scope frequency range without operating frequency');
     }
-    const matched = DEFAULT_SCOPE_FREQUENCY_RANGES.find((range) => targetFrequency >= range.lowHz && targetFrequency < range.highHz);
+    const matched = this.activeProfile.scopeRanges.find((range) => targetFrequency >= range.lowHz && targetFrequency < range.highHz);
     if (!matched) {
       throw new Error(`No scope frequency range matches ${targetFrequency} Hz`);
     }
@@ -750,7 +761,7 @@ export class IcomControl {
   }
 
   getScopeSupportedEdgeSlots(): number[] {
-    return [...DEFAULT_SCOPE_EDGE_SLOTS];
+    return [...this.activeProfile.scopeEdgeSlots];
   }
 
   async getSpectrumDisplayState(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<IcomSpectrumDisplayState> {
@@ -780,8 +791,8 @@ export class IcomControl {
       supportedModes: ['center', 'fixed', 'scroll-center', 'scroll-fixed'],
       supportedSpans: [...DEFAULT_SCOPE_SPANS_HZ],
       supportedEdgeSlots: this.getScopeSupportedEdgeSlots(),
-      supportsFixedEdges: true,
-      supportsEdgeSlotSelection: true,
+      supportsFixedEdges: this.activeProfile.scopeRanges.length > 0,
+      supportsEdgeSlotSelection: this.activeProfile.scopeEdgeSlots.length > 0,
     };
   }
 
@@ -885,7 +896,11 @@ export class IcomControl {
   async setFrequency(hz: number): Promise<void> {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    this.sendCiv(IcomRigCommands.setFrequency(ctrAddr, rigAddr, hz));
+    const bcdBytes = this.activeProfile.frequencyBcdBytes(hz);
+    const frame = this.activeProfile.supportsX25X26
+      ? IcomRigCommands.setSelectedFrequency(ctrAddr, rigAddr, hz, bcdBytes, 0)
+      : IcomRigCommands.setFrequency(ctrAddr, rigAddr, hz, bcdBytes);
+    this.sendCiv(frame);
   }
 
   /**
@@ -902,11 +917,17 @@ export class IcomControl {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
     const modeCode = typeof mode === 'string' ? getModeCode(mode) : mode;
+    const filter = options?.filter ?? this.lastFilter ?? this.activeProfile.defaultFilter;
 
-    if (options?.dataMode) {
-      this.sendCiv(IcomRigCommands.setOperationDataMode(ctrAddr, rigAddr, modeCode));
+    if (this.activeProfile.supportsX25X26 && this.activeProfile.modeWithFilter) {
+      this.sendCiv(IcomRigCommands.setSelectedMode(ctrAddr, rigAddr, modeCode, !!options?.dataMode, filter, 0));
+      return;
+    }
+
+    if (options?.dataMode && this.activeProfile.dataModeSupported) {
+      this.sendCiv(IcomRigCommands.setOperationDataMode(ctrAddr, rigAddr, modeCode, filter));
     } else {
-      this.sendCiv(IcomRigCommands.setMode(ctrAddr, rigAddr, modeCode));
+      this.sendCiv(IcomRigCommands.setMode(ctrAddr, rigAddr, modeCode, filter));
     }
   }
 
@@ -922,97 +943,88 @@ export class IcomControl {
     const timeoutMs = options?.timeout ?? 3000;
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    const req = IcomRigCommands.readOperatingFrequency(ctrAddr, rigAddr);
-    const resp = await this.waitForCivFrame((frame) => IcomControl.isReplyOf(frame, 0x03, ctrAddr, rigAddr), timeoutMs, () => this.sendCiv(req));
+    const useX25 = this.activeProfile.supportsX25X26;
+    const req = useX25
+      ? IcomRigCommands.readSelectedFrequency(ctrAddr, rigAddr, 0)
+      : IcomRigCommands.readOperatingFrequency(ctrAddr, rigAddr);
+    const resp = await this.waitForCivFrame(
+      (frame) => useX25
+        ? IcomControl.matchCommandFrame(frame, CIV.C_SEND_SEL_FREQ, [0x00], ctrAddr, rigAddr)
+        : IcomControl.matchCommandFrame(frame, CIV.C_RD_FREQ, [], ctrAddr, rigAddr),
+      timeoutMs,
+      () => this.sendCiv(req)
+    );
     if (!resp) return null;
-    const freq = IcomControl.parseIcomFreqFromReply(resp);
-    return freq;
+    return IcomControl.parseFrequencyReply(resp, useX25 ? 1 : 0);
   }
 
   /**
    * Read current operating mode and filter
    * @returns { mode: number, filter?: number } or null
    */
-  async readOperatingMode(options?: QueryOptions): Promise<{ mode: number; filter?: number; modeName?: string; filterName?: string } | null> {
+  async readOperatingMode(options?: QueryOptions): Promise<{ mode: number; filter?: number; modeName?: string; filterName?: string; dataMode?: boolean } | null> {
     const timeoutMs = options?.timeout ?? 3000;
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    const req = IcomRigCommands.readOperatingMode(ctrAddr, rigAddr);
+    const useX26 = this.activeProfile.supportsX25X26 && this.activeProfile.modeWithFilter;
+    const req = useX26 ? IcomRigCommands.readSelectedMode(ctrAddr, rigAddr, 0) : IcomRigCommands.readOperatingMode(ctrAddr, rigAddr);
     const resp = await this.waitForCivFrame(
-      (frame) => IcomControl.matchCommandFrame(frame, 0x04, [], ctrAddr, rigAddr),
+      (frame) => useX26
+        ? IcomControl.matchCommandFrame(frame, CIV.C_SEND_SEL_MODE, [0x00], ctrAddr, rigAddr)
+        : IcomControl.matchCommandFrame(frame, CIV.C_RD_MODE, [], ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
     );
     if (!resp) return null;
-    // Expect FE FE [ctr] [rig] 0x04 [mode] [filter] FD (some rigs may omit filter)
-    const mode = resp.length > 5 ? resp[5] : undefined;
-    const filter = resp.length > 6 ? resp[6] : undefined;
+
+    const mode = useX26 ? resp[6] : resp[5];
+    const dataMode = useX26 ? resp[7] !== 0x00 : undefined;
+    const filter = useX26 ? resp[8] : (resp.length > 6 ? resp[6] : undefined);
     if (mode === undefined) return null;
-    // Map names using constants
+    if (filter === 1 || filter === 2 || filter === 3) this.lastFilter = filter;
     const { getModeString, getFilterString } = await import('./IcomConstants');
     const modeName = getModeString(mode);
     const filterName = getFilterString(filter);
-    return { mode, filter, modeName, filterName };
+    return { mode, filter, modeName, filterName, dataMode };
   }
 
   /**
    * Read current transmit frequency (when TX)
    */
   async readTransmitFrequency(options?: QueryOptions): Promise<number | null> {
+    if (!this.activeProfile.supportsX1C03TxFreq) return null;
     const timeoutMs = options?.timeout ?? 3000;
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomRigCommands.readTransmitFrequency(ctrAddr, rigAddr);
     const resp = await this.waitForCivFrame(
-      (frame) => IcomControl.matchCommandFrame(frame, 0x1c, [0x03], ctrAddr, rigAddr),
+      (frame) => IcomControl.matchCommandFrame(frame, CIV.C_CTL_PTT, [CIV.S_RD_TX_FREQ], ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
     );
     if (!resp) return null;
-    // Parse BCD like readOperatingFrequency, but starting after [0x1c, 0x03]
-    // Find 0x1c position and read next 2 bytes (0x03 + 5 BCD bytes)
-    let idx = resp.indexOf(0x1c, 4);
-    if (idx < 0 || idx + 6 >= resp.length) idx = 4;
-    if (idx + 6 >= resp.length) return null;
-    // After 0x1c 0x03, we expect 5 BCD bytes
-    if (resp[idx + 1] !== 0x03) return null;
-    const d0 = resp[idx + 2];
-    const d1 = resp[idx + 3];
-    const d2 = resp[idx + 4];
-    const d3 = resp[idx + 5];
-    const d4 = resp[idx + 6];
-    const bcdToInt = (b: number) => ((b >> 4) & 0x0f) * 10 + (b & 0x0f);
-    const v0 = bcdToInt(d0);
-    const v1 = bcdToInt(d1);
-    const v2 = bcdToInt(d2);
-    const v3 = bcdToInt(d3);
-    const v4 = bcdToInt(d4);
-    const hz = v0 + v1 * 100 + v2 * 10000 + v3 * 1000000 + v4 * 100000000;
-    return hz;
+    return IcomControl.parseFrequencyReply(resp, 1);
   }
 
-  /**
-   * Read transceiver state (TX/RX) via 0x1A 0x00 0x48
-   * Note: Java comments mark this as not recommended; use with caution.
-   */
-  async readTransceiverState(options?: QueryOptions): Promise<'TX' | 'RX' | 'UNKNOWN' | null> {
+  async readPtt(options?: QueryOptions): Promise<boolean | null> {
     const timeoutMs = options?.timeout ?? 3000;
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    const req = IcomRigCommands.readTransceiverState(ctrAddr, rigAddr);
+    const req = IcomRigCommands.readPTT(ctrAddr, rigAddr);
     const resp = await this.waitForCivFrame(
-      (frame) => IcomControl.matchCommandFrame(frame, 0x1a, [0x00, 0x48], ctrAddr, rigAddr),
+      (frame) => IcomControl.matchCommandFrame(frame, CIV.C_CTL_PTT, [CIV.S_PTT], ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
     );
-    if (!resp) return null;
-    // Heuristic: take first data byte after subcmd2 as state
-    const pos = 5 + 2; // after 0x1a [0x00,0x48]
-    const state = resp.length > pos ? resp[pos] : undefined;
-    if (state === undefined) return 'UNKNOWN';
-    if (state === 0x01) return 'TX';
-    if (state === 0x00) return 'RX';
-    return 'UNKNOWN';
+    if (!resp || resp.length < 7) return null;
+    return resp[6] !== 0x00;
+  }
+
+  /** Read transceiver state (TX/RX) using standard Hamlib-aligned PTT status. */
+  async readTransceiverState(options?: QueryOptions): Promise<'TX' | 'RX' | 'UNKNOWN' | null> {
+    const ptt = await this.readPtt(options);
+    if (ptt === null) return null;
+    return ptt ? 'TX' : 'RX';
   }
 
   /**
@@ -1059,8 +1071,8 @@ export class IcomControl {
 
     return {
       raw,
-      swr: raw / 100,
-      alert: raw >= METER_THRESHOLDS.SWR_ALERT
+      swr: interpolateCalibration(raw, this.activeProfile.calibrations.swr),
+      alert: interpolateCalibration(raw, this.activeProfile.calibrations.swr) >= 3.0
     };
   }
 
@@ -1090,8 +1102,8 @@ export class IcomControl {
 
     return {
       raw,
-      percent: (raw / METER_THRESHOLDS.ALC_MAX) * 100,
-      alert: raw > METER_THRESHOLDS.ALC_ALERT_MAX
+      percent: interpolateCalibration(raw, this.activeProfile.calibrations.alc),
+      alert: interpolateCalibration(raw, this.activeProfile.calibrations.alc) > 100
     };
   }
 
@@ -1106,13 +1118,15 @@ export class IcomControl {
    * }
    */
   async getConnectorWLanLevel(options?: QueryOptions): Promise<WlanLevelReading | null> {
+    const ext = this.activeProfile.vendorExtensions.connectorWlanLevel;
+    if (!ext) return null;
     const timeoutMs = options?.timeout ?? 3000;
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    const req = IcomRigCommands.getConnectorWLanLevel(ctrAddr, rigAddr);
-    const resp = await this.waitForCivFrame((frame) => IcomControl.matchCommandFrame(frame, 0x1a, [0x05, 0x01, 0x17], ctrAddr, rigAddr), timeoutMs, () => this.sendCiv(req));
+    const req = IcomRigCommands.getConnectorWLanLevel(ctrAddr, rigAddr, ext.subext);
+    const resp = await this.waitForCivFrame((frame) => IcomControl.matchCommandFrame(frame, ext.command, [ext.subcmd, ...ext.subext], ctrAddr, rigAddr), timeoutMs, () => this.sendCiv(req));
 
-    const raw = IcomControl.extractMeterData(resp);
+    const raw = IcomControl.extractTrailingBcd(resp, ext.dataBytes);
     if (raw === null) return null;
 
     return {
@@ -1153,9 +1167,7 @@ export class IcomControl {
     if (data.length === 0) return null;
     const raw = data[data.length - 1] & 0xff; // use low byte as 0-255 level
 
-    // Convert raw value to S-meter reading with physical units
-    // Uses IC-705 calibration by default (can be extended to support other models)
-    return rawToSMeter(raw, 'IC-705');
+    return rawToSMeter(raw, this.activeProfile.calibrations.sMeterModel);
   }
 
   /**
@@ -1163,9 +1175,37 @@ export class IcomControl {
    * @param level - Audio level (0-255)
    */
   async setConnectorWLanLevel(level: number): Promise<void> {
+    const ext = this.activeProfile.vendorExtensions.connectorWlanLevel;
+    if (!ext) {
+      throw new UnsupportedCommandError({ modelId: this.getProfileModelId(), commandName: 'setConnectorWLanLevel', civCommand: '0x1a/0x05', reason: 'No vendor WLAN level extension for active profile' });
+    }
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    this.sendCiv(IcomRigCommands.setConnectorWLanLevel(ctrAddr, rigAddr, level));
+    this.sendCiv(IcomRigCommands.setConnectorWLanLevel(ctrAddr, rigAddr, level, ext.subext));
+  }
+
+  async getUsbAfLevel(options?: QueryOptions): Promise<WlanLevelReading | null> {
+    const ext = this.activeProfile.extParams.usbAfLevel;
+    if (!ext) return null;
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.getUsbAfLevel(ctrAddr, rigAddr, ext.subext);
+    const resp = await this.waitForCivFrame((frame) => IcomControl.matchCommandFrame(frame, ext.command, [ext.subcmd, ...ext.subext], ctrAddr, rigAddr), timeoutMs, () => this.sendCiv(req));
+    const raw = IcomControl.extractTrailingBcd(resp, ext.dataBytes);
+    if (raw === null) return null;
+    return { raw, percent: (raw / 255) * 100 };
+  }
+
+  async setUsbAfLevel(level: number): Promise<void> {
+    const ext = this.activeProfile.extParams.usbAfLevel;
+    if (!ext) {
+      throw new UnsupportedCommandError({ modelId: this.getProfileModelId(), commandName: 'setUsbAfLevel', civCommand: '0x1a/0x05', reason: 'No USB AF level extension for active profile' });
+    }
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const raw = Math.max(0, Math.min(255, Math.round(level)));
+    this.sendCiv(IcomRigCommands.setUsbAfLevel(ctrAddr, rigAddr, raw, ext.subext));
   }
 
   /**
@@ -1176,10 +1216,14 @@ export class IcomControl {
    * await rig.setConnectorDataMode('WLAN');
    */
   async setConnectorDataMode(mode: ConnectorDataMode | number): Promise<void> {
+    const ext = this.activeProfile.vendorExtensions.connectorDataMode;
+    if (!ext) {
+      throw new UnsupportedCommandError({ modelId: this.getProfileModelId(), commandName: 'setConnectorDataMode', civCommand: '0x1a/0x05', reason: 'No vendor connector data-mode extension for active profile' });
+    }
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
     const modeCode = typeof mode === 'string' ? getConnectorModeCode(mode) : mode;
-    this.sendCiv(IcomRigCommands.setConnectorDataMode(ctrAddr, rigAddr, modeCode));
+    this.sendCiv(IcomRigCommands.setConnectorDataMode(ctrAddr, rigAddr, modeCode, ext.subext));
   }
 
   /**
@@ -1189,7 +1233,7 @@ export class IcomControl {
    */
 
   /**
-   * Read antenna tuner status (CI-V 0x1A/0x00)
+   * Read antenna tuner status (CI-V 0x1C/0x01)
    * 00=OFF, 01=ON, 02=TUNING
    */
   async readTunerStatus(options?: QueryOptions): Promise<TunerStatusReading | null> {
@@ -1198,12 +1242,12 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomRigCommands.getTunerStatus(ctrAddr, rigAddr);
     const resp = await this.waitForCivFrame(
-      (frame) => IcomControl.matchCommandFrame(frame, 0x1a, [0x00], ctrAddr, rigAddr),
+      (frame) => IcomControl.matchCommandFrame(frame, CIV.C_CTL_PTT, [CIV.S_ANT_TUN], ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
     );
     if (!resp) return null;
-    // Expect FE FE [ctr] [rig] 0x1A 0x00 [status] FD
+    // Expect FE FE [ctr] [rig] 0x1C 0x01 [status] FD
     const raw = resp.length > 6 ? (resp[6] & 0xff) : undefined;
     if (raw === undefined) return null;
     const state: TunerState = raw === 0x00 ? 'OFF' : raw === 0x01 ? 'ON' : raw === 0x02 ? 'TUNING' : 'OFF';
@@ -1211,7 +1255,7 @@ export class IcomControl {
   }
 
   /**
-   * Enable or disable internal antenna tuner (CI-V 0x1A/0x01)
+   * Enable or disable internal antenna tuner (CI-V 0x1C/0x01)
    * @param enabled true to enable, false to disable
    */
   async setTunerEnabled(enabled: boolean): Promise<void> {
@@ -1221,7 +1265,7 @@ export class IcomControl {
   }
 
   /**
-   * Start a manual tuning cycle (same as [TUNE] key) (CI-V 0x1A/0x02/0x00)
+   * Start a manual tuning cycle (same as [TUNE] key) (CI-V 0x1C/0x01/0x02)
    */
   async startManualTune(): Promise<void> {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
@@ -1271,14 +1315,26 @@ export class IcomControl {
 
   /** Get microphone gain. Returns 0.0–1.0, or null on timeout. */
   async getMicGain(options?: QueryOptions): Promise<LevelReading | null> {
-    const v = await this.read0x14Level(0x0f, options);
+    const v = await this.read0x14Level(CIV.S_LVL_MICGAIN, options);
     if (v === null) return null;
     return { raw: Math.round(v * 255), normalized: v };
   }
 
   /** Set microphone gain. Value 0.0–1.0. */
   setMicGain(value: number): void {
-    this.write0x14Level(0x0f, value);
+    this.write0x14Level(CIV.S_LVL_MICGAIN, value);
+  }
+
+  /** Get break-in delay. Returns 0.0–1.0, or null on timeout. */
+  async getBreakInDelay(options?: QueryOptions): Promise<LevelReading | null> {
+    const v = await this.read0x14Level(CIV.S_LVL_BKINDL, options);
+    if (v === null) return null;
+    return { raw: Math.round(v * 255), normalized: v };
+  }
+
+  /** Set break-in delay. Value 0.0–1.0. */
+  setBreakInDelay(value: number): void {
+    this.write0x14Level(CIV.S_LVL_BKINDL, value);
   }
 
   /** Get noise blanker level. 0.0 = off, >0.0 = on with strength. */
@@ -1295,14 +1351,14 @@ export class IcomControl {
 
   /** Get noise reduction level. 0.0 = off, >0.0 = on with strength. */
   async getNRLevel(options?: QueryOptions): Promise<LevelReading | null> {
-    const v = await this.read0x14Level(0x13, options);
+    const v = await this.read0x14Level(CIV.S_LVL_NR, options);
     if (v === null) return null;
     return { raw: Math.round(v * 255), normalized: v };
   }
 
   /** Set noise reduction level. Value 0.0 (off) – 1.0. */
   setNRLevel(value: number): void {
-    this.write0x14Level(0x13, value);
+    this.write0x14Level(CIV.S_LVL_NR, value);
   }
 
   /**
@@ -1419,9 +1475,12 @@ export class IcomControl {
     const raw = IcomControl.extractMeterData(resp);
     if (raw === null) return null;
 
+    const watts = interpolateCalibration(raw, this.activeProfile.calibrations.rfPowerWatts);
+    const maxWatts = this.activeProfile.calibrations.rfPowerWatts[this.activeProfile.calibrations.rfPowerWatts.length - 1]?.value ?? 100;
     return {
       raw,
-      percent: rawToPowerPercent(raw)
+      percent: maxWatts > 0 ? Math.min(100, (watts / maxWatts) * 100) : 0,
+      watts
     };
   }
 
@@ -1449,9 +1508,11 @@ export class IcomControl {
     const raw = IcomControl.extractMeterData(resp);
     if (raw === null) return null;
 
+    const db = interpolateCalibration(raw, this.activeProfile.calibrations.compDb);
     return {
       raw,
-      percent: (raw / 255) * 100
+      percent: (db / 30) * 100,
+      db
     };
   }
 
@@ -1481,7 +1542,7 @@ export class IcomControl {
 
     return {
       raw,
-      volts: rawToVoltage(raw)
+      volts: interpolateCalibration(raw, this.activeProfile.calibrations.voltage)
     };
   }
 
@@ -1511,7 +1572,7 @@ export class IcomControl {
 
     return {
       raw,
-      amps: rawToCurrent(raw)
+      amps: interpolateCalibration(raw, this.activeProfile.calibrations.current)
     };
   }
 
@@ -1528,9 +1589,16 @@ export class IcomControl {
    */
   private static extractMeterData(frame: Buffer | null): number | null {
     if (!frame || frame.length < 9) return null;
-    // Extract 2-byte BCD data at position 6-7 of the CI-V frame (FE FE [ctr] [rig] 0x15 [sub] [b0] [b1] FD)
-    const bcdData = frame.subarray(6, 8);
-    return parseTwoByteBcd(bcdData);
+    // FE FE [ctr] [rig] 0x15 [sub] [bcd_hi] [bcd_lo] FD
+    return decodeBcdBE(frame.subarray(6, 8));
+  }
+
+  private static extractTrailingBcd(frame: Buffer | null, byteLength: number): number | null {
+    if (!frame || frame.length < 6 + byteLength) return null;
+    const end = frame.length - 1;
+    const start = end - byteLength;
+    if (start < 5) return null;
+    return decodeBcdBE(frame.subarray(start, end));
   }
 
   private static matchCommand(frame: Buffer, cmd: number, tail: number[]) {
@@ -1590,29 +1658,20 @@ export class IcomControl {
     });
   }
 
-  // Parse CI-V reply for command 0x03 (read operating frequency)
-  static parseIcomFreqFromReply(frame: Buffer): number | null {
-    // Expect: FE FE [ctr] [rig] 0x03 [bcd0..bcd4] FD
+  static parseFrequencyReply(frame: Buffer, payloadOffsetAfterCommand: number, byteLength?: number): number | null {
     if (!(frame && frame.length >= 7)) return null;
-    if (frame[0] !== 0xfe || frame[1] !== 0xfe) return null;
-    if (frame[4] !== 0x03) return null;
-    // Some radios may include extra bytes; find 0x03 and read next 5 bytes
-    let idx = frame.indexOf(0x03, 5);
-    if (idx < 0 || idx + 5 >= frame.length) idx = 4; // fallback to standard position
-    if (idx + 5 >= frame.length) return null;
-    const d0 = frame[idx + 1];
-    const d1 = frame[idx + 2];
-    const d2 = frame[idx + 3];
-    const d3 = frame[idx + 4];
-    const d4 = frame[idx + 5];
-    const bcdToInt = (b: number) => ((b >> 4) & 0x0f) * 10 + (b & 0x0f);
-    const v0 = bcdToInt(d0);
-    const v1 = bcdToInt(d1);
-    const v2 = bcdToInt(d2);
-    const v3 = bcdToInt(d3);
-    const v4 = bcdToInt(d4);
-    const hz = v0 + v1 * 100 + v2 * 10000 + v3 * 1000000 + v4 * 100000000;
-    return hz;
+    if (frame[0] !== 0xfe || frame[1] !== 0xfe || frame[frame.length - 1] !== 0xfd) return null;
+    const start = 5 + payloadOffsetAfterCommand;
+    const maxBytes = frame.length - 1 - start;
+    const len = byteLength ?? (maxBytes >= 6 ? 6 : 5);
+    if (maxBytes < len || len <= 0) return null;
+    return decodeFrequencyBcdLE(frame.subarray(start, start + len));
+  }
+
+  // Parse standard CI-V 0x03 read-frequency replies.
+  static parseIcomFreqFromReply(frame: Buffer): number | null {
+    if (!IcomControl.matchCommandFrame(frame, CIV.C_RD_FREQ, [])) return null;
+    return IcomControl.parseFrequencyReply(frame, 0);
   }
 
   sendAudioFloat32(samples: Float32Array, addLeadingBuffer: boolean = false) {
@@ -1745,9 +1804,14 @@ export class IcomControl {
             audioName: RadioCapPacket.getAudioName(cap),
             supportTX: RadioCapPacket.getSupportTX(cap)
           };
-          if (info.civAddress != null) this.civ.civAddress = info.civAddress;
+          if (info.civAddress != null) {
+            this.civ.civAddress = info.civAddress;
+            this.resolveActiveProfile({ civAddress: info.civAddress });
+            info.modelId = this.activeProfile.modelId;
+            info.profileName = this.activeProfile.profileName;
+          }
           if (info.supportTX != null) this.civ.supportTX = info.supportTX;
-          dbgV('CAP <= civAddr=', info.civAddress, 'audioName=', info.audioName, 'supportTX=', info.supportTX);
+          dbgV('CAP <= civAddr=', info.civAddress, 'audioName=', info.audioName, 'supportTX=', info.supportTX, 'profile=', info.modelId);
           this.ev.emit('capabilities', info);
         }
         break;
@@ -1759,7 +1823,8 @@ export class IcomControl {
         const busy = ConnInfoPacket.getBusy(buf);
         this.macAddress = ConnInfoPacket.getMacAddress(buf);
         this.rigName = ConnInfoPacket.getRigName(buf);
-        dbg('CONNINFO <= busy=', busy, 'rigName=', this.rigName);
+        this.resolveActiveProfile({ rigName: this.rigName });
+        dbg('CONNINFO <= busy=', busy, 'rigName=', this.rigName, 'profile=', this.activeProfile.modelId);
 
         if (busy) {
           dbg('CONNINFO busy=true detected - likely reconnecting while rig still has old session');

@@ -28,6 +28,9 @@ export { parseTwoByteBcd, intToTwoByteBcd } from './utils/bcd';
 
 // Export low-level utilities (for advanced users)
 export { IcomRigCommands } from './rig/IcomRigCommands';
+export { CIV } from './rig/IcomCivSpec';
+export { buildCivFrame, encodeFrequencyBcdLE, decodeFrequencyBcdLE, encodeBcdBE, decodeBcdBE } from './rig/IcomCivFrame';
+export { ICOM_PROFILES, resolveIcomProfile, getProfileByModel, interpolateCalibration } from './rig/IcomProfiles';
 export { AUDIO_RATE } from './rig/IcomAudio';
 
 // Export error handling utilities (optional, for robustness)
@@ -40,5 +43,6 @@ export {
 // Export disconnect error utilities
 export {
   ConnectionAbortedError,
+  UnsupportedCommandError,
   getDisconnectMessage
 } from './utils/errors';

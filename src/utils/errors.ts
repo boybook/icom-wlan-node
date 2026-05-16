@@ -63,3 +63,32 @@ export class ConnectionAbortedError extends Error {
     };
   }
 }
+
+
+export interface UnsupportedCommandContext {
+  modelId?: string;
+  commandName: string;
+  civCommand?: number | string;
+  reason?: string;
+}
+
+export class UnsupportedCommandError extends Error {
+  public readonly modelId?: string;
+  public readonly commandName: string;
+  public readonly civCommand?: number | string;
+  public readonly reason?: string;
+
+  constructor(context: UnsupportedCommandContext) {
+    const details = [
+      context.modelId ? `model=${context.modelId}` : undefined,
+      context.civCommand !== undefined ? `civ=${context.civCommand}` : undefined,
+      context.reason,
+    ].filter(Boolean).join(', ');
+    super(`Unsupported ICOM CI-V command '${context.commandName}'${details ? ` (${details})` : ''}`);
+    this.name = 'UnsupportedCommandError';
+    this.modelId = context.modelId;
+    this.commandName = context.commandName;
+    this.civCommand = context.civCommand;
+    this.reason = context.reason;
+  }
+}

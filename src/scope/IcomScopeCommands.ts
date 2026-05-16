@@ -1,57 +1,43 @@
+import { buildCivFrame, encodeFrequencyBcdLE } from '../rig/IcomCivFrame';
+import { CIV } from '../rig/IcomCivSpec';
+
 export const IcomScopeCommands = {
   setScopeDataOutput(ctrAddr: number, rigAddr: number, enabled: boolean): Buffer {
-    return Buffer.from([
-      0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x27, 0x11, enabled ? 0x01 : 0x00, 0xfd
-    ]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_SCP, subcmd: CIV.S_SCP_DOP, payload: [enabled ? 0x01 : 0x00] });
   },
 
   setScopeDisplay(ctrAddr: number, rigAddr: number, enabled: boolean): Buffer {
-    return Buffer.from([
-      0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x27, 0x10, enabled ? 0x01 : 0x00, 0xfd
-    ]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_SCP, subcmd: CIV.S_SCP_STS, payload: [enabled ? 0x01 : 0x00] });
   },
 
   readScopeSpan(ctrAddr: number, rigAddr: number, receiver: 0 | 1 = 0): Buffer {
-    return Buffer.from([
-      0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x27, 0x15, receiver & 0xff, 0xfd
-    ]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_SCP, subcmd: CIV.S_SCP_SPN, payload: [receiver & 0xff] });
   },
 
   setScopeSpan(ctrAddr: number, rigAddr: number, spanHz: number, receiver: 0 | 1 = 0): Buffer {
-    const bytes = IcomScopeCommands.encodeScopeSpanHz(spanHz);
-    return Buffer.from([
-      0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x27, 0x15, receiver & 0xff, ...bytes, 0xfd
-    ]);
+    // Hamlib maps public span to ICOM's +/- span value.
+    const bytes = IcomScopeCommands.encodeScopeSpanHz(Math.round(spanHz / 2));
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_SCP, subcmd: CIV.S_SCP_SPN, payload: [receiver & 0xff, ...bytes] });
   },
 
   readScopeMode(ctrAddr: number, rigAddr: number, receiver: 0 | 1 = 0): Buffer {
-    return Buffer.from([
-      0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x27, 0x14, receiver & 0xff, 0xfd
-    ]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_SCP, subcmd: CIV.S_SCP_MOD, payload: [receiver & 0xff] });
   },
 
   setScopeMode(ctrAddr: number, rigAddr: number, mode: 0 | 1 | 2 | 3, receiver: 0 | 1 = 0): Buffer {
-    return Buffer.from([
-      0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x27, 0x14, receiver & 0xff, mode & 0xff, 0xfd
-    ]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_SCP, subcmd: CIV.S_SCP_MOD, payload: [receiver & 0xff, mode & 0xff] });
   },
 
   readScopeEdge(ctrAddr: number, rigAddr: number, receiver: 0 | 1 = 0): Buffer {
-    return Buffer.from([
-      0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x27, 0x16, receiver & 0xff, 0xfd
-    ]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_SCP, subcmd: CIV.S_SCP_EDG, payload: [receiver & 0xff] });
   },
 
   setScopeEdge(ctrAddr: number, rigAddr: number, edgeSlot: number, receiver: 0 | 1 = 0): Buffer {
-    return Buffer.from([
-      0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x27, 0x16, receiver & 0xff, edgeSlot & 0xff, 0xfd
-    ]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_SCP, subcmd: CIV.S_SCP_EDG, payload: [receiver & 0xff, edgeSlot & 0xff] });
   },
 
   readScopeFixedEdge(ctrAddr: number, rigAddr: number, rangeId: number, edgeSlot: number): Buffer {
-    return Buffer.from([
-      0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x27, 0x1e, rangeId & 0xff, edgeSlot & 0xff, 0xfd
-    ]);
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_SCP, subcmd: CIV.S_SCP_FEF, payload: [rangeId & 0xff, edgeSlot & 0xff] });
   },
 
   setScopeFixedEdge(
@@ -62,37 +48,25 @@ export const IcomScopeCommands = {
     lowHz: number,
     highHz: number
   ): Buffer {
-    return Buffer.from([
-      0xfe, 0xfe, rigAddr & 0xff, ctrAddr & 0xff, 0x27, 0x1e,
-      rangeId & 0xff,
-      edgeSlot & 0xff,
-      ...IcomScopeCommands.encodeScopeFreqHz(lowHz),
-      ...IcomScopeCommands.encodeScopeFreqHz(highHz),
-      0xfd
-    ]);
+    return buildCivFrame({
+      rigAddr,
+      ctrlAddr: ctrAddr,
+      cmd: CIV.C_CTL_SCP,
+      subcmd: CIV.S_SCP_FEF,
+      payload: [
+        rangeId & 0xff,
+        edgeSlot & 0xff,
+        ...IcomScopeCommands.encodeScopeFreqHz(lowHz),
+        ...IcomScopeCommands.encodeScopeFreqHz(highHz),
+      ],
+    });
   },
 
   encodeScopeSpanHz(spanHz: number): Buffer {
-    const safeSpanHz = Math.max(0, Math.round(spanHz));
-    const out = Buffer.alloc(5);
-    let remaining = safeSpanHz;
-    for (let i = 0; i < out.length; i++) {
-      const twoDigits = remaining % 100;
-      out[i] = ((((twoDigits / 10) | 0) & 0x0f) << 4) | (twoDigits % 10);
-      remaining = Math.floor(remaining / 100);
-    }
-    return out;
+    return encodeFrequencyBcdLE(Math.max(0, Math.round(spanHz)), 5);
   },
 
   encodeScopeFreqHz(freqHz: number): Buffer {
-    const safeFreqHz = Math.max(0, Math.round(freqHz));
-    const out = Buffer.alloc(5);
-    let remaining = safeFreqHz;
-    for (let i = 0; i < out.length; i++) {
-      const twoDigits = remaining % 100;
-      out[i] = ((((twoDigits / 10) | 0) & 0x0f) << 4) | (twoDigits % 10);
-      remaining = Math.floor(remaining / 100);
-    }
-    return out;
+    return encodeFrequencyBcdLE(Math.max(0, Math.round(freqHz)), 5);
   }
 };

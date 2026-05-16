@@ -8,8 +8,12 @@ export interface IcomCredentials {
   password: string;
 }
 
+export type IcomModelId = 'IC-705' | 'IC-905' | 'IC-7300' | 'IC-9700' | 'IC-7610' | 'IC-7760' | 'generic-modern-icom';
+
 export interface IcomRigOptions extends IcomCredentials {
   control: UdpAddress; // Icom control service (UDP) address
+  /** Radio model profile. Defaults to auto-detection from rig name or CI-V address. */
+  model?: IcomModelId | 'auto';
 }
 
 export interface CivCommand {
@@ -38,6 +42,8 @@ export interface CapabilitiesInfo {
   civAddress?: number;
   audioName?: string;
   supportTX?: boolean;
+  modelId?: IcomModelId;
+  profileName?: string;
 }
 
 export interface IcomRigEvents {
@@ -89,9 +95,11 @@ export type ConnectorDataMode = keyof typeof CONNECTOR_MODE_MAP;
 export interface SetModeOptions {
   /**
    * Enable data mode (e.g., USB-D for digital modes)
-   * Uses CI-V command 0x26 instead of 0x06
+   * Uses CI-V command 0x26 on modern targetable ICOM profiles.
    */
   dataMode?: boolean;
+  /** Optional IF filter preset. Modern DSP rigs commonly support 1, 2, or 3. */
+  filter?: 1 | 2 | 3;
 }
 
 /**
@@ -223,8 +231,8 @@ export interface LevelReading {
 export interface SwrReading {
   /**
    * Raw BCD value (0-300+)
-   * Actual SWR = raw / 100
-   * Example: 120 = SWR 1.2, 250 = SWR 2.5
+   * Conversion is profile-calibrated from Hamlib curves.
+   * Example: raw 48 ≈ SWR 1.5, raw 120 ≈ SWR 3.0 on modern ICOM profiles.
    */
   raw: number;
 
@@ -235,7 +243,7 @@ export interface SwrReading {
   swr: number;
 
   /**
-   * Alert flag when SWR is too high (≥1.2)
+   * Alert flag when SWR is too high (≥3.0)
    * High SWR can damage transmitter
    */
   alert: boolean;
@@ -344,11 +352,13 @@ export interface OvfStatusReading {
 export interface PowerLevelReading {
   /**
    * Raw BCD value (0-255)
-   * Calibration: 0143≈50%, 0213≈100%
+   * Calibration is model-specific.
    */
   raw: number;
-  /** Percentage of maximum power (0-100%) */
+  /** Percentage of profile maximum power (0-100%) */
   percent: number;
+  /** Estimated RF output in watts when profile calibration is available */
+  watts?: number;
 }
 
 /**
@@ -358,8 +368,10 @@ export interface PowerLevelReading {
 export interface CompLevelReading {
   /** Raw BCD value (0-255) */
   raw: number;
-  /** Percentage of maximum compression (0-100%) */
+  /** Percentage of 30 dB compression scale (0-100%) */
   percent: number;
+  /** Estimated compression level in dB */
+  db?: number;
 }
 
 /**
@@ -395,7 +407,7 @@ export interface CurrentReading {
 // ============================================================================
 
 /**
- * Antenna tuner state (IC-705 CI-V 0x1A/0x00)
+ * Antenna tuner state (standard CI-V 0x1C/0x01)
  * 00=OFF, 01=ON, 02=TUNING
  */
 export type TunerState = 'OFF' | 'ON' | 'TUNING';
