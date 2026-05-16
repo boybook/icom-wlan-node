@@ -10,6 +10,31 @@ export interface IcomCredentials {
 
 export type IcomModelId = 'IC-705' | 'IC-905' | 'IC-7300' | 'IC-9700' | 'IC-7610' | 'IC-7760' | 'generic-modern-icom';
 
+export type IcomFunctionName =
+  | 'NB' | 'NR' | 'COMP' | 'VOX' | 'TONE' | 'TSQL' | 'SBKIN' | 'FBKIN'
+  | 'MON' | 'ANF' | 'MN' | 'LOCK' | 'RIT' | 'XIT' | 'TUNER'
+  | 'APF' | 'AFC' | 'VSC' | 'DUAL_WATCH' | 'SATMODE'
+  | 'SCOPE' | 'SPECTRUM' | 'SPECTRUM_HOLD' | 'TRANSCEIVE' | 'OVF_STATUS'
+  | 'DIGI_SEL' | 'IPP' | 'TX_INHIBIT' | 'DPP' | 'ICPW2';
+
+export type IcomLevelName =
+  | 'AF' | 'RF' | 'SQL' | 'IF' | 'APF' | 'NR' | 'NB'
+  | 'PBT_IN' | 'PBT_OUT' | 'CWPITCH' | 'RFPOWER' | 'MICGAIN'
+  | 'KEYSPD' | 'NOTCHF_RAW' | 'COMP' | 'BKINDL' | 'BALANCE'
+  | 'VOXGAIN' | 'ANTIVOX' | 'VOXDELAY' | 'MONITOR_GAIN' | 'DRIVE_GAIN'
+  | 'DIGI_SEL_LEVEL' | 'AGC' | 'AGC_TIME' | 'SPECTRUM_AVG';
+
+export type IcomParameterName =
+  | 'ANN' | 'BEEP' | 'BACKLIGHT' | 'SCREENSAVER' | 'TIME'
+  | 'KEYERTYPE' | 'AFIF' | 'AFIF_WLAN' | 'AFIF_LAN' | 'AFIF_ACC';
+
+export type IcomVfoName = 'A' | 'B' | 'MAIN' | 'SUB' | 'MAIN_A' | 'MAIN_B' | 'SUB_A' | 'SUB_B' | 'MEM' | 'CURR' | 'TX';
+export type IcomVfoOperation = 'copy' | 'exchange' | 'from-vfo' | 'to-vfo' | 'memory-clear' | 'tune';
+export type IcomRepeaterShift = 'none' | 'minus' | 'plus';
+export type IcomSpectrumSpeed = 'slow' | 'mid' | 'fast';
+export type IcomSpectrumCenterType = 'filter-center' | 'carrier-point-center' | 'carrier-point-center-abs';
+export type IcomAudioIfSource = 'default' | 'wlan' | 'lan' | 'acc';
+
 export interface IcomRigOptions extends IcomCredentials {
   control: UdpAddress; // Icom control service (UDP) address
   /** Radio model profile. Defaults to auto-detection from rig name or CI-V address. */

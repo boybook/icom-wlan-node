@@ -1,4 +1,12 @@
-import type { IcomModelId } from '../types';
+import type {
+  IcomAudioIfSource,
+  IcomFunctionName,
+  IcomLevelName,
+  IcomModelId,
+  IcomParameterName,
+  IcomVfoName,
+  IcomVfoOperation,
+} from '../types';
 
 export interface CalibrationPoint {
   raw: number;
@@ -10,8 +18,10 @@ export interface IcomExtParam {
   subcmd: number;
   subext: number[];
   dataBytes: number;
-  dataType: 'level' | 'bool' | 'int';
+  dataType: 'level' | 'bool' | 'int' | 'time';
 }
+
+export type IcomExtParamTable = Partial<Record<IcomFunctionName | IcomLevelName | IcomParameterName, IcomExtParam>>;
 
 export interface IcomProfile {
   modelId: IcomModelId;
@@ -28,6 +38,16 @@ export interface IcomProfile {
   scopeSingleFrameDataLength?: number;
   scopeEdgeSlots: number[];
   scopeRanges: Array<{ rangeId: number; lowHz: number; highHz: number }>;
+  functions: IcomFunctionName[];
+  levels: IcomLevelName[];
+  parameters: IcomParameterName[];
+  tuningSteps: Array<{ hz: number; code: number }>;
+  vfoOps: IcomVfoOperation[];
+  vfos: IcomVfoName[];
+  repeater: boolean;
+  tone: boolean;
+  spectrumAdvanced: Array<'dataOutput' | 'hold' | 'speed' | 'ref' | 'avg' | 'vbw' | 'rbw' | 'duringTx' | 'centerType'>;
+  audioIfSources: IcomAudioIfSource[];
   calibrations: {
     sMeterModel: string;
     swr: CalibrationPoint[];
@@ -41,6 +61,7 @@ export interface IcomProfile {
     usbAfLevel?: IcomExtParam;
     afIfWlan?: IcomExtParam;
   };
+  extParamSpecs: IcomExtParamTable;
   vendorExtensions: {
     connectorWlanLevel?: IcomExtParam;
     connectorDataMode?: { command: number; subcmd: number; subext: number[] };
@@ -154,6 +175,76 @@ const IC705_CURRENT = [
   { raw: 241, value: 4 },
 ];
 
+const COMMON_FUNCTIONS: IcomFunctionName[] = [
+  'NB', 'NR', 'COMP', 'VOX', 'TONE', 'TSQL', 'SBKIN', 'FBKIN',
+  'MON', 'ANF', 'MN', 'LOCK', 'RIT', 'XIT', 'TUNER', 'SCOPE',
+  'SPECTRUM', 'SPECTRUM_HOLD', 'TRANSCEIVE', 'OVF_STATUS',
+];
+
+const COMMON_LEVELS: IcomLevelName[] = [
+  'AF', 'RF', 'SQL', 'IF', 'NR', 'NB', 'PBT_IN', 'PBT_OUT',
+  'CWPITCH', 'RFPOWER', 'MICGAIN', 'KEYSPD', 'NOTCHF_RAW', 'COMP',
+  'BKINDL', 'VOXGAIN', 'ANTIVOX', 'MONITOR_GAIN', 'AGC', 'AGC_TIME',
+];
+
+const COMMON_PARAMETERS: IcomParameterName[] = ['ANN', 'BEEP', 'BACKLIGHT', 'SCREENSAVER', 'TIME', 'KEYERTYPE', 'AFIF'];
+const SAFE_FUNCTIONS: IcomFunctionName[] = ['NB', 'NR', 'COMP', 'VOX', 'MON', 'ANF', 'MN', 'LOCK', 'RIT', 'XIT', 'TUNER', 'SCOPE', 'SPECTRUM', 'SPECTRUM_HOLD', 'OVF_STATUS'];
+const SAFE_LEVELS: IcomLevelName[] = ['AF', 'RF', 'SQL', 'NR', 'NB', 'RFPOWER', 'MICGAIN', 'COMP', 'BKINDL', 'MONITOR_GAIN'];
+const DEFAULT_VFOS: IcomVfoName[] = ['A', 'B', 'CURR', 'TX'];
+const TARGETABLE_VFOS: IcomVfoName[] = ['A', 'B', 'MAIN', 'SUB', 'MAIN_A', 'MAIN_B', 'SUB_A', 'SUB_B', 'MEM', 'CURR', 'TX'];
+const COMMON_VFO_OPS: IcomVfoOperation[] = ['copy', 'exchange', 'from-vfo', 'to-vfo', 'memory-clear', 'tune'];
+const IC905_VFO_OPS: IcomVfoOperation[] = ['copy', 'from-vfo', 'to-vfo', 'memory-clear', 'tune'];
+const SPECTRUM_ADVANCED = ['dataOutput', 'hold', 'speed', 'ref', 'avg', 'vbw', 'rbw', 'duringTx', 'centerType'] as IcomProfile['spectrumAdvanced'];
+
+const TS_IC756PRO = [
+  { hz: 10, code: 0x00 },
+  { hz: 100, code: 0x01 },
+  { hz: 1000, code: 0x02 },
+  { hz: 5000, code: 0x03 },
+  { hz: 9000, code: 0x04 },
+  { hz: 10000, code: 0x05 },
+  { hz: 12500, code: 0x06 },
+  { hz: 20000, code: 0x07 },
+  { hz: 25000, code: 0x08 },
+];
+
+const TS_IC7300 = [
+  { hz: 1, code: 0x00 },
+  ...TS_IC756PRO.slice(1),
+];
+
+const TS_IC705 = [
+  { hz: 10, code: 0x00 },
+  { hz: 100, code: 0x01 },
+  { hz: 500, code: 0x02 },
+  { hz: 1000, code: 0x03 },
+  { hz: 5000, code: 0x04 },
+  { hz: 6250, code: 0x05 },
+  { hz: 8330, code: 0x06 },
+  { hz: 9000, code: 0x07 },
+  { hz: 10000, code: 0x08 },
+  { hz: 12500, code: 0x09 },
+  { hz: 20000, code: 0x10 },
+  { hz: 25000, code: 0x11 },
+  { hz: 50000, code: 0x12 },
+  { hz: 100000, code: 0x13 },
+];
+
+const TS_IC9700 = [
+  { hz: 10, code: 0x00 },
+  { hz: 100, code: 0x01 },
+  { hz: 500, code: 0x02 },
+  { hz: 1000, code: 0x03 },
+  { hz: 5000, code: 0x04 },
+  { hz: 6250, code: 0x05 },
+  { hz: 10000, code: 0x06 },
+  { hz: 12500, code: 0x07 },
+  { hz: 20000, code: 0x08 },
+  { hz: 25000, code: 0x09 },
+  { hz: 50000, code: 0x10 },
+  { hz: 100000, code: 0x11 },
+];
+
 function baseProfile(overrides: Partial<IcomProfile> & Pick<IcomProfile, 'modelId' | 'profileName' | 'defaultCivAddress' | 'aliases'>): IcomProfile {
   return {
     supportsX25X26: true,
@@ -166,6 +257,16 @@ function baseProfile(overrides: Partial<IcomProfile> & Pick<IcomProfile, 'modelI
     scopeSingleFrameDataLength: 50,
     scopeEdgeSlots: [1, 2, 3, 4],
     scopeRanges: HF_SCOPE_RANGES_13,
+    functions: SAFE_FUNCTIONS,
+    levels: SAFE_LEVELS,
+    parameters: [],
+    tuningSteps: TS_IC705,
+    vfoOps: COMMON_VFO_OPS,
+    vfos: DEFAULT_VFOS,
+    repeater: false,
+    tone: false,
+    spectrumAdvanced: ['dataOutput', 'hold', 'speed', 'ref', 'vbw', 'duringTx', 'centerType'],
+    audioIfSources: ['default'],
     calibrations: {
       sMeterModel: 'IC-705',
       swr: DEFAULT_SWR,
@@ -176,6 +277,7 @@ function baseProfile(overrides: Partial<IcomProfile> & Pick<IcomProfile, 'modelI
       current: DEFAULT_CURRENT,
     },
     extParams: {},
+    extParamSpecs: {},
     vendorExtensions: {},
     ...overrides,
   };
@@ -184,6 +286,72 @@ function baseProfile(overrides: Partial<IcomProfile> & Pick<IcomProfile, 'modelI
 const ic705Ext = {
   usbAfLevel: { command: 0x1a, subcmd: 0x05, subext: [0x01, 0x13], dataBytes: 2, dataType: 'level' as const },
   afIfWlan: { command: 0x1a, subcmd: 0x05, subext: [0x01, 0x14], dataBytes: 1, dataType: 'bool' as const },
+};
+
+const ext = (subext: number[], dataBytes: number, dataType: IcomExtParam['dataType']): IcomExtParam => ({
+  command: 0x1a,
+  subcmd: 0x05,
+  subext,
+  dataBytes,
+  dataType,
+});
+
+const IC7300_EXT_SPECS: IcomExtParamTable = {
+  BEEP: ext([0x00, 0x23], 1, 'bool'),
+  BACKLIGHT: ext([0x00, 0x81], 2, 'level'),
+  SCREENSAVER: ext([0x00, 0x89], 1, 'int'),
+  TIME: ext([0x00, 0x95], 2, 'time'),
+  AFIF: ext([0x00, 0x59], 1, 'bool'),
+  VOXDELAY: ext([0x01, 0x59], 1, 'int'),
+  TRANSCEIVE: ext([0x00, 0x71], 1, 'bool'),
+  SPECTRUM_AVG: ext([0x01, 0x02], 1, 'int'),
+  AGC_TIME: { command: 0x1a, subcmd: 0x04, subext: [], dataBytes: 1, dataType: 'int' },
+  KEYERTYPE: ext([0x01, 0x64], 1, 'int'),
+};
+
+const IC705_EXT_SPECS: IcomExtParamTable = {
+  BEEP: ext([0x00, 0x31], 1, 'bool'),
+  BACKLIGHT: ext([0x01, 0x36], 2, 'level'),
+  SCREENSAVER: ext([0x01, 0x38], 1, 'int'),
+  TIME: ext([0x01, 0x66], 2, 'time'),
+  AFIF: ext([0x01, 0x09], 1, 'bool'),
+  AFIF_WLAN: ext([0x01, 0x14], 1, 'bool'),
+  VOXDELAY: ext([0x03, 0x59], 1, 'int'),
+  TRANSCEIVE: ext([0x01, 0x31], 1, 'bool'),
+  SPECTRUM_AVG: ext([0x01, 0x78], 1, 'int'),
+  AGC_TIME: { command: 0x1a, subcmd: 0x04, subext: [], dataBytes: 1, dataType: 'int' },
+  KEYERTYPE: ext([0x02, 0x55], 1, 'int'),
+};
+
+const IC9700_EXT_SPECS: IcomExtParamTable = {
+  BEEP: ext([0x00, 0x29], 1, 'bool'),
+  BACKLIGHT: ext([0x01, 0x52], 2, 'level'),
+  SCREENSAVER: ext([0x01, 0x67], 1, 'int'),
+  TIME: ext([0x01, 0x80], 2, 'time'),
+  AFIF: ext([0x01, 0x05], 1, 'bool'),
+  AFIF_ACC: ext([0x01, 0x00], 1, 'bool'),
+  AFIF_LAN: ext([0x01, 0x10], 1, 'bool'),
+  VOXDELAY: ext([0x03, 0x30], 1, 'int'),
+  TRANSCEIVE: ext([0x01, 0x27], 1, 'bool'),
+  SPECTRUM_AVG: ext([0x01, 0x92], 1, 'int'),
+  AGC_TIME: { command: 0x1a, subcmd: 0x04, subext: [], dataBytes: 1, dataType: 'int' },
+  KEYERTYPE: ext([0x02, 0x27], 1, 'int'),
+};
+
+const IC7610_EXT_SPECS: IcomExtParamTable = {
+  BEEP: ext([0x00, 0x24], 1, 'bool'),
+  BACKLIGHT: ext([0x01, 0x41], 2, 'level'),
+  TIME: ext([0x01, 0x59], 2, 'time'),
+  VOXDELAY: ext([0x02, 0x92], 1, 'int'),
+  TRANSCEIVE: ext([0x01, 0x12], 1, 'bool'),
+  SPECTRUM_AVG: ext([0x01, 0x70], 1, 'int'),
+  AGC_TIME: { command: 0x1a, subcmd: 0x04, subext: [], dataBytes: 1, dataType: 'int' },
+  KEYERTYPE: ext([0x02, 0x31], 1, 'int'),
+};
+
+const IC7760_EXT_SPECS: IcomExtParamTable = {
+  VOXDELAY: ext([0x01, 0x82], 1, 'int'),
+  AGC_TIME: { command: 0x1a, subcmd: 0x04, subext: [], dataBytes: 1, dataType: 'int' },
 };
 
 const ic705Vendor = {
@@ -198,6 +366,8 @@ export const ICOM_PROFILES: Record<IcomModelId, IcomProfile> = {
     defaultCivAddress: 0xa4,
     aliases: ['generic', 'icom'],
     scopeRanges: HF_VHF_UHF_SCOPE_RANGES_17,
+    functions: SAFE_FUNCTIONS,
+    levels: SAFE_LEVELS,
   }),
   'IC-705': baseProfile({
     modelId: 'IC-705',
@@ -205,6 +375,16 @@ export const ICOM_PROFILES: Record<IcomModelId, IcomProfile> = {
     defaultCivAddress: 0xa4,
     aliases: ['IC-705', 'IC705'],
     scopeRanges: HF_VHF_UHF_SCOPE_RANGES_17,
+    functions: COMMON_FUNCTIONS,
+    levels: [...COMMON_LEVELS, 'SPECTRUM_AVG'],
+    parameters: [...COMMON_PARAMETERS, 'AFIF_WLAN'],
+    tuningSteps: TS_IC705,
+    vfoOps: COMMON_VFO_OPS,
+    vfos: DEFAULT_VFOS,
+    repeater: true,
+    tone: true,
+    spectrumAdvanced: ['dataOutput', 'hold', 'speed', 'ref', 'avg', 'vbw', 'duringTx', 'centerType'],
+    audioIfSources: ['default', 'wlan'],
     calibrations: {
       sMeterModel: 'IC-705',
       swr: DEFAULT_SWR,
@@ -215,6 +395,7 @@ export const ICOM_PROFILES: Record<IcomModelId, IcomProfile> = {
       current: IC705_CURRENT,
     },
     extParams: ic705Ext,
+    extParamSpecs: IC705_EXT_SPECS,
     vendorExtensions: ic705Vendor,
   }),
   'IC-905': baseProfile({
@@ -224,6 +405,16 @@ export const ICOM_PROFILES: Record<IcomModelId, IcomProfile> = {
     aliases: ['IC-905', 'IC905'],
     frequencyBcdBytes: (freqHz) => freqHz > 5.85e9 ? 6 : 5,
     scopeRanges: HF_VHF_UHF_SCOPE_RANGES_17,
+    functions: COMMON_FUNCTIONS,
+    levels: [...COMMON_LEVELS, 'SPECTRUM_AVG'],
+    parameters: [...COMMON_PARAMETERS, 'AFIF_WLAN'],
+    tuningSteps: TS_IC705,
+    vfoOps: IC905_VFO_OPS,
+    vfos: DEFAULT_VFOS,
+    repeater: true,
+    tone: true,
+    spectrumAdvanced: ['dataOutput', 'hold', 'speed', 'ref', 'avg', 'vbw', 'duringTx', 'centerType'],
+    audioIfSources: ['default', 'wlan'],
     calibrations: {
       sMeterModel: 'IC-705',
       swr: DEFAULT_SWR,
@@ -234,6 +425,7 @@ export const ICOM_PROFILES: Record<IcomModelId, IcomProfile> = {
       current: DEFAULT_CURRENT,
     },
     extParams: ic705Ext,
+    extParamSpecs: IC705_EXT_SPECS,
     vendorExtensions: ic705Vendor,
   }),
   'IC-7300': baseProfile({
@@ -242,8 +434,24 @@ export const ICOM_PROFILES: Record<IcomModelId, IcomProfile> = {
     defaultCivAddress: 0x94,
     aliases: ['IC-7300', 'IC7300'],
     scopeRanges: HF_SCOPE_RANGES_13,
+    functions: COMMON_FUNCTIONS,
+    levels: [...COMMON_LEVELS, 'DRIVE_GAIN', 'DIGI_SEL_LEVEL', 'SPECTRUM_AVG'],
+    parameters: COMMON_PARAMETERS,
+    tuningSteps: TS_IC7300,
+    vfoOps: COMMON_VFO_OPS,
+    vfos: DEFAULT_VFOS,
+    repeater: false,
+    tone: true,
+    spectrumAdvanced: ['dataOutput', 'hold', 'speed', 'ref', 'avg', 'vbw', 'duringTx', 'centerType'],
+    audioIfSources: ['default'],
     extParams: {
       usbAfLevel: { command: 0x1a, subcmd: 0x05, subext: [0x00, 0x60], dataBytes: 2, dataType: 'level' },
+    },
+    extParamSpecs: {
+      ...IC7300_EXT_SPECS,
+      DRIVE_GAIN: { command: 0x14, subcmd: 0x14, subext: [], dataBytes: 2, dataType: 'level' },
+      DIGI_SEL: { command: 0x16, subcmd: 0x4e, subext: [], dataBytes: 1, dataType: 'bool' },
+      DIGI_SEL_LEVEL: { command: 0x14, subcmd: 0x13, subext: [], dataBytes: 2, dataType: 'level' },
     },
   }),
   'IC-9700': baseProfile({
@@ -252,9 +460,20 @@ export const ICOM_PROFILES: Record<IcomModelId, IcomProfile> = {
     defaultCivAddress: 0xa2,
     aliases: ['IC-9700', 'IC9700'],
     scopeRanges: IC9700_SCOPE_RANGES,
+    functions: [...COMMON_FUNCTIONS, 'SATMODE', 'DUAL_WATCH', 'AFC'],
+    levels: [...COMMON_LEVELS, 'SPECTRUM_AVG'],
+    parameters: [...COMMON_PARAMETERS, 'AFIF_LAN', 'AFIF_ACC'],
+    tuningSteps: TS_IC9700,
+    vfoOps: ['copy', 'exchange', 'from-vfo', 'to-vfo', 'memory-clear'],
+    vfos: TARGETABLE_VFOS,
+    repeater: true,
+    tone: true,
+    spectrumAdvanced: ['dataOutput', 'hold', 'speed', 'ref', 'avg', 'vbw', 'duringTx', 'centerType'],
+    audioIfSources: ['default', 'lan', 'acc'],
     extParams: {
       usbAfLevel: { command: 0x1a, subcmd: 0x05, subext: [0x01, 0x06], dataBytes: 2, dataType: 'level' },
     },
+    extParamSpecs: IC9700_EXT_SPECS,
   }),
   'IC-7610': baseProfile({
     modelId: 'IC-7610',
@@ -263,8 +482,28 @@ export const ICOM_PROFILES: Record<IcomModelId, IcomProfile> = {
     aliases: ['IC-7610', 'IC7610'],
     scopeLineLength: 689,
     scopeRanges: IC7610_SCOPE_RANGES,
+    functions: [...COMMON_FUNCTIONS, 'APF', 'DUAL_WATCH', 'DIGI_SEL', 'IPP', 'TX_INHIBIT', 'DPP', 'ICPW2'],
+    levels: [...COMMON_LEVELS, 'APF', 'BALANCE', 'DRIVE_GAIN', 'DIGI_SEL_LEVEL', 'SPECTRUM_AVG'],
+    parameters: ['BEEP', 'BACKLIGHT', 'TIME', 'KEYERTYPE'],
+    tuningSteps: TS_IC756PRO,
+    vfoOps: COMMON_VFO_OPS,
+    vfos: TARGETABLE_VFOS,
+    repeater: false,
+    tone: true,
+    spectrumAdvanced: SPECTRUM_ADVANCED,
+    audioIfSources: ['default'],
     extParams: {
       usbAfLevel: { command: 0x1a, subcmd: 0x05, subext: [0x00, 0x82], dataBytes: 2, dataType: 'level' },
+    },
+    extParamSpecs: {
+      ...IC7610_EXT_SPECS,
+      DRIVE_GAIN: { command: 0x14, subcmd: 0x14, subext: [], dataBytes: 2, dataType: 'level' },
+      DIGI_SEL: { command: 0x16, subcmd: 0x4e, subext: [], dataBytes: 1, dataType: 'bool' },
+      DIGI_SEL_LEVEL: { command: 0x14, subcmd: 0x13, subext: [], dataBytes: 2, dataType: 'level' },
+      IPP: { command: 0x16, subcmd: 0x65, subext: [], dataBytes: 1, dataType: 'bool' },
+      TX_INHIBIT: { command: 0x16, subcmd: 0x66, subext: [], dataBytes: 1, dataType: 'bool' },
+      DPP: { command: 0x16, subcmd: 0x67, subext: [], dataBytes: 1, dataType: 'bool' },
+      ICPW2: ext([0x03, 0x10], 1, 'bool'),
     },
   }),
   'IC-7760': baseProfile({
@@ -273,6 +512,21 @@ export const ICOM_PROFILES: Record<IcomModelId, IcomProfile> = {
     defaultCivAddress: 0xb2,
     aliases: ['IC-7760', 'IC7760'],
     scopeRanges: HF_SCOPE_RANGES_13,
+    functions: ['NB', 'NR', 'COMP', 'VOX', 'TONE', 'TSQL', 'SBKIN', 'FBKIN', 'MON', 'ANF', 'MN', 'VSC', 'LOCK', 'RIT', 'XIT', 'TUNER', 'APF', 'DIGI_SEL'],
+    levels: [...COMMON_LEVELS, 'APF', 'BALANCE', 'DRIVE_GAIN', 'DIGI_SEL_LEVEL'],
+    parameters: ['ANN', 'BACKLIGHT'],
+    tuningSteps: TS_IC756PRO,
+    vfoOps: COMMON_VFO_OPS,
+    vfos: DEFAULT_VFOS,
+    repeater: false,
+    tone: true,
+    spectrumAdvanced: [],
+    extParamSpecs: {
+      ...IC7760_EXT_SPECS,
+      DRIVE_GAIN: { command: 0x14, subcmd: 0x14, subext: [], dataBytes: 2, dataType: 'level' },
+      DIGI_SEL: { command: 0x16, subcmd: 0x4e, subext: [], dataBytes: 1, dataType: 'bool' },
+      DIGI_SEL_LEVEL: { command: 0x14, subcmd: 0x13, subext: [], dataBytes: 2, dataType: 'level' },
+    },
   }),
 };
 

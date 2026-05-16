@@ -119,6 +119,86 @@ export const IcomRigCommands = {
     return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_LVL, subcmd, payload: [bcdHi, bcdLo] });
   },
 
+  readCommand(ctrAddr: number, rigAddr: number, cmd: number, subcmd?: number | number[], payload?: number[] | Buffer): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd, subcmd, payload });
+  },
+
+  writeCommand(ctrAddr: number, rigAddr: number, cmd: number, subcmd: number | number[] | undefined, payload?: number[] | Buffer): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd, subcmd, payload });
+  },
+
+  readFunction(ctrAddr: number, rigAddr: number, subcmd: number, payload?: number[] | Buffer): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_FUNC, subcmd, payload });
+  },
+
+  setFunction(ctrAddr: number, rigAddr: number, subcmd: number, value: number, payloadPrefix: number[] = []): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_FUNC, subcmd, payload: [...payloadPrefix, value & 0xff] });
+  },
+
+  readExtParam(ctrAddr: number, rigAddr: number, command: number, subcmd: number, subext: number[] = []): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: command, subcmd, payload: subext });
+  },
+
+  writeExtParam(ctrAddr: number, rigAddr: number, command: number, subcmd: number, subext: number[] = [], payload: number[] | Buffer = []): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: command, subcmd, payload: [...subext, ...Array.from(payload)] });
+  },
+
+  readRitOffset(ctrAddr: number, rigAddr: number): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_RIT, subcmd: CIV.S_RIT_FREQ });
+  },
+
+  setRitOffset(ctrAddr: number, rigAddr: number, payload: number[] | Buffer): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_RIT, subcmd: CIV.S_RIT_FREQ, payload });
+  },
+
+  readRitEnabled(ctrAddr: number, rigAddr: number): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_RIT, subcmd: CIV.S_RIT });
+  },
+
+  setRitEnabled(ctrAddr: number, rigAddr: number, enabled: boolean): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_RIT, subcmd: CIV.S_RIT, payload: [enabled ? 1 : 0] });
+  },
+
+  readXitEnabled(ctrAddr: number, rigAddr: number): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_RIT, subcmd: CIV.S_XIT });
+  },
+
+  setXitEnabled(ctrAddr: number, rigAddr: number, enabled: boolean): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_RIT, subcmd: CIV.S_XIT, payload: [enabled ? 1 : 0] });
+  },
+
+  readSplit(ctrAddr: number, rigAddr: number): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_SPLT });
+  },
+
+  setSplit(ctrAddr: number, rigAddr: number, enabled: boolean): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_SPLT, subcmd: enabled ? CIV.S_SPLT_ON : CIV.S_SPLT_OFF });
+  },
+
+  readTuningStep(ctrAddr: number, rigAddr: number): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_SET_TS });
+  },
+
+  setTuningStep(ctrAddr: number, rigAddr: number, code: number): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_SET_TS, subcmd: code });
+  },
+
+  readRepeaterShift(ctrAddr: number, rigAddr: number): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_SPLT });
+  },
+
+  setRepeaterShift(ctrAddr: number, rigAddr: number, code: number): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_SPLT, subcmd: code });
+  },
+
+  readTone(ctrAddr: number, rigAddr: number, subcmd: number): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_SET_TONE, subcmd });
+  },
+
+  setTone(ctrAddr: number, rigAddr: number, subcmd: number, toneTenthHz: number): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_SET_TONE, subcmd, payload: encodeBcdBE(toneTenthHz, 3) });
+  },
+
   getTunerStatus(ctrAddr: number, rigAddr: number): Buffer {
     return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_PTT, subcmd: CIV.S_ANT_TUN });
   },

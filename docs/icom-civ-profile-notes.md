@@ -26,6 +26,24 @@ This project transports CI-V frames inside ICOM LAN/WLAN UDP CIV packets. The UD
 | Meters | Raw divide-by constants | Profile calibration interpolation for SWR, ALC, RF power, COMP, voltage/current | `icom.c`, `ic7300.c`, `ic7610.c`, `ic7760.c` |
 | Connector WLAN level | Treated as general ICOM standard | Private vendor extension only when profile declares it | absent from Hamlib standard extcmds |
 
+## A/B API Coverage Added
+
+| Public area | Hamlib/CI-V source | Notes |
+| --- | --- | --- |
+| Generic function layer | `icom_set_func()` / `icom_get_func()` | `0x16` function family for NB, NR, COMP, VOX, TONE, TSQL, ANF, MON, manual notch, lock, APF/AFC/VSC where supported |
+| BK-IN wrappers | `S_FUNC_BKIN = 0x47` | Semi break-in writes raw `1`, full break-in writes raw `2`, off writes raw `0` |
+| RIT/XIT | `C_CTL_RIT = 0x21` | Offset uses `0x21 0x00` with little-endian BCD plus sign byte; enable flags use `0x21 0x01/0x02` |
+| Generic level layer | `icom_set_level()` / `icom_get_level()` | Adds RF gain, IF shift, PBT in/out, CW pitch, key speed, notch, compressor, monitor gain, VOX gain, anti-VOX and profile ext levels |
+| CW pitch / key speed | `cw_lookup` and `RIG_LEVEL_CWPITCH` logic in `icom.c` | CW pitch is exposed as 300..900 Hz; key speed is exposed as 6..48 WPM |
+| Split / TX VFO | `icom_set_split_*()` and targetable `0x25/0x26` paths | Modern profiles use VFO number `1` for TX frequency/mode; split enable uses `0x0f 0x00/0x01` |
+| VFO operations | `icom_vfo_op()` | Safe subset: copy, exchange, from VFO, to VFO, memory clear and tune |
+| Tuning step | `ic7300_ts_sc_list`, `ic705_ts_sc_list`, `ic9700_ts_sc_list`, `ic756pro_ts_sc_list` | Step tables are profile data and writes use `0x10 [stepCode]` |
+| Tone / repeater | `C_SET_TONE`, `C_CTL_SPLT`, `C_RD_OFFS`, `C_SET_OFFS` | CTCSS is public Hz encoded as tenth-Hz BCD BE; repeater offset is public Hz encoded as 100 Hz units |
+| Parameters / extcmds | model `*_extcmds[]` tables | Adds BEEP, BACKLIGHT, SCREENSAVER, TIME, KEYERTYPE, AFIF/AFIF_WLAN/AFIF_LAN/AFIF_ACC, TRANSCEIVE, SPECTRUM_AVG and USB AF where profile declares them |
+| Spectrum advanced | `icom_set_ext_level()`, `icom_get_ext_level()`, `S_SCP_*` constants | Adds data output, hold, speed, reference level, average, VBW/RBW, during-TX and center type controls |
+
+Deferred items remain intentionally out of scope: marker position (`TOK_SCOPE_MKP` is listed by some profiles but has no concrete generic handler in the inspected Hamlib path), full scan/memory APIs, CW/voice memory, power state, clock, antenna selection and D-STAR/raw digital families.
+
 ## Profile Defaults
 
 The first profile set covers `IC-705`, `IC-905`, `IC-7300`, `IC-9700`, `IC-7610`, `IC-7760`, plus `generic-modern-icom`. A user-provided `IcomRigOptions.model` wins over auto-detection; otherwise the active profile is resolved from rig name, then CI-V address, then generic fallback.

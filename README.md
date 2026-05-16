@@ -122,6 +122,17 @@ await rig.setTunerEnabled(true);
 const swr = await rig.readSWR();
 const power = await rig.readPowerLevel();
 console.log({ tuner, swr, watts: power?.watts, powerPercent: power?.percent });
+
+// Hamlib A/B-level controls are profile-gated.
+await rig.setFunction('NR', true);
+await rig.setNoiseReductionEnabled(true);
+await rig.setLevel('RF', 0.5);
+await rig.setRitOffset(-120);
+await rig.setSplitEnabled(true);
+await rig.setSplitFrequency(7074000);
+await rig.setTuningStep(100);
+await rig.setToneFrequency(88.5);
+await rig.setSpectrumSpeed('slow');
 ```
 
 Profile-specific behavior includes IC-905 6-byte frequency BCD above 5.85 GHz, model-specific scope fixed-edge ranges, and calibrated SWR/ALC/RF power/COMP/voltage/current meters. Private connector commands such as WLAN level or connector data mode are only enabled when the active profile declares the vendor extension; unsupported writes throw `UnsupportedCommandError`.
@@ -222,6 +233,10 @@ await rig.disableScope();
   - **Rig Control**: `setFrequency()`, `setMode()`, `setConnectorDataMode()`, `setConnectorWLanLevel()`
   - **Rig Query**: `readOperatingFrequency()`, `readOperatingMode()`, `readTransmitFrequency()`, `readPtt()`, `readTransceiverState()`, `readBandEdges()`
   - **Antenna Tuner**: `readTunerStatus()`, `setTunerEnabled()`, `startManualTune()`
+  - **Functions**: `getFunction()`, `setFunction()`, plus wrappers for NB/NR/COMP/VOX/MON/ANF/MN/LOCK/BK-IN
+  - **Levels**: `getLevel()`, `setLevel()`, plus wrappers for RF gain, IF shift, PBT, CW pitch, key speed, monitor gain, VOX gain
+  - **RIT/XIT + Split/VFO**: `getRitOffset()`, `setRitOffset()`, `getSplitEnabled()`, `setSplitFrequency()`, `getVfo()`, `setVfo()`, `vfoOperation()`
+  - **Tone/Tuning**: `getTuningStep()`, `setTuningStep()`, `getToneFrequency()`, `setToneFrequency()`, `getRepeaterShift()`, `setRepeaterOffset()`
   - **Meters (RX)**: `readSquelchStatus()`, `readAudioSquelch()`, `readOvfStatus()`, `getLevelMeter()`
   - **Meters (TX)**: `readSWR()`, `readALC()`, `readPowerLevel()`, `readCompLevel()`
   - **Power Supply**: `readVoltage()`, `readCurrent()`
@@ -362,6 +377,20 @@ The library exposes common CI‑V operations as friendly methods. Addresses are 
 - `readTransceiverState(options?: QueryOptions) => Promise<'TX' | 'RX' | 'UNKNOWN' | null>`
 - `readBandEdges(options?: QueryOptions) => Promise<Buffer|null>`
 
+#### Hamlib A/B Functions, Levels, RIT/XIT, Split, and Tone
+
+- `getFunction(name: IcomFunctionName, options?: QueryOptions) => Promise<boolean|null>` / `setFunction(name, enabled)` — Generic Hamlib function layer for supported profile functions such as `NB`, `NR`, `COMP`, `VOX`, `MON`, `ANF`, `MN`, `LOCK`, `RIT`, `XIT`, `TUNER`, `SCOPE`, `SPECTRUM`, `SPECTRUM_HOLD`, and model-specific extensions.
+- Common function wrappers: `getNoiseBlankerEnabled()/setNoiseBlankerEnabled()`, `getNoiseReductionEnabled()/setNoiseReductionEnabled()`, `getCompressorEnabled()/setCompressorEnabled()`, `getVoxEnabled()/setVoxEnabled()`, `getMonitorEnabled()/setMonitorEnabled()`, `getAutoNotchEnabled()/setAutoNotchEnabled()`, `getManualNotchEnabled()/setManualNotchEnabled()`, `getDialLockEnabled()/setDialLockEnabled()`.
+- `getBreakInMode() => Promise<'off'|'semi'|'full'|null>` / `setBreakInMode(mode)` — Hamlib-aligned BK-IN control using `0x16 0x47`, where raw `1` is semi and raw `2` is full.
+- `getLevel(name: IcomLevelName, options?: QueryOptions) => Promise<number|null>` / `setLevel(name, value)` — Generic level layer for `AF`, `RF`, `SQL`, `IF`, `PBT_IN`, `PBT_OUT`, `CWPITCH`, `KEYSPD`, `NOTCHF_RAW`, `COMP`, `MONITOR_GAIN`, `VOXGAIN`, `ANTIVOX`, and profile ext levels.
+- Common level wrappers: `getRFGain()/setRFGain()`, `getIFShift()/setIFShift()`, `getPbtIn()/setPbtIn()`, `getPbtOut()/setPbtOut()`, `getCwPitch()/setCwPitch()`, `getKeySpeed()/setKeySpeed()`, `getNotchRaw()/setNotchRaw()`, `getCompressionLevel()/setCompressionLevel()`, `getMonitorGain()/setMonitorGain()`, `getVoxGain()/setVoxGain()`, `getAntiVox()/setAntiVox()`.
+- `getRitOffset()/setRitOffset()` and `getXitOffset()/setXitOffset()` — RIT/XIT delta register using Hamlib `0x21 0x00`; `getRitEnabled()/setRitEnabled()` and `getXitEnabled()/setXitEnabled()` use `0x21 0x01/0x02`.
+- `getSplitEnabled()/setSplitEnabled()`, `getSplitFrequency()/setSplitFrequency()`, `getSplitMode()/setSplitMode()` — Modern profiles use targetable TX VFO `0x25/0x26` with VFO number `1`.
+- `getVfo()/setVfo()` and `vfoOperation('copy'|'exchange'|'from-vfo'|'to-vfo'|'memory-clear'|'tune')` — Safe Hamlib VFO operation subset.
+- `getTuningStep()/setTuningStep(hz)` — Profile-specific Hamlib tuning step tables.
+- `getToneFrequency()/setToneFrequency(hz)` and `getToneSquelchFrequency()/setToneSquelchFrequency(hz)` — CTCSS values use public Hz, encoded as tenth-Hz BCD BE.
+- `getRepeaterShift()/setRepeaterShift('none'|'minus'|'plus')` and `getRepeaterOffset()/setRepeaterOffset(hz)` — Repeater offset uses public Hz, encoded as 100 Hz units.
+
 #### Scope / Spectrum
 
 - `scope: IcomScopeService` — Standalone scope service object that can be reused with other CI‑V transport paths in the future
@@ -379,6 +408,7 @@ The library exposes common CI‑V operations as friendly methods. Addresses are 
 - `getSpectrumMode()/setSpectrumMode()` / `getSpectrumSpan()/setSpectrumSpan()` / `getSpectrumEdgeSlot()/setSpectrumEdgeSlot()` / `getSpectrumFixedEdges()/setSpectrumFixedEdges()` — Hamlib-like convenience aliases over the scope-specific methods
 - `getSpectrumDisplayState(options?: QueryOptions & { receiver?: 0 | 1 }) => Promise<IcomSpectrumDisplayState>` — Read a Hamlib-like normalized display state
 - `configureSpectrumDisplay(config?: IcomSpectrumDisplayConfig) => Promise<IcomSpectrumDisplayState>` — Apply a normalized display config covering center/fixed modes
+- `getSpectrumDataOutput()/setSpectrumDataOutput()`, `getSpectrumHold()/setSpectrumHold()`, `getSpectrumSpeed()/setSpectrumSpeed()`, `getSpectrumRef()/setSpectrumRef()`, `getSpectrumAverage()/setSpectrumAverage()`, `getSpectrumVbw()/setSpectrumVbw()`, `getSpectrumRbw()/setSpectrumRbw()`, `getSpectrumDuringTx()/setSpectrumDuringTx()`, `getSpectrumCenterType()/setSpectrumCenterType()` — Advanced Hamlib spectrum controls where the active profile supports them
 - `waitForScopeFrame(options?: QueryOptions) => Promise<IcomScopeFrame | null>` — Wait for the next complete scope frame
 
 `IcomScopeFrame` shape:
@@ -433,6 +463,8 @@ Current implementation notes:
 
 **Audio Configuration**:
 - `getUsbAfLevel(options?: QueryOptions) => Promise<{ raw: number; percent: number } | null>` / `setUsbAfLevel(level: number)` — Hamlib-aligned USB AF level when the active profile declares it
+- `getAudioIfMode(options?: QueryOptions) => Promise<'default'|'wlan'|'lan'|'acc'|null>` / `setAudioIfMode(source)` — Hamlib AF/IF audio routing for profile-supported WLAN/LAN/ACC parameters
+- `getParameter(name, options?)` / `setParameter(name, value)` — Generic profile ext-param API for `BEEP`, `BACKLIGHT`, `SCREENSAVER`, `TIME`, `KEYERTYPE`, and `AFIF*`
 - `getConnectorWLanLevel(options?: QueryOptions) => Promise<{ raw: number; percent: number } | null>` / `setConnectorWLanLevel(level: number)` — Private `icom-wlan-node` WLAN level extension; returns `null` or throws `UnsupportedCommandError` when the active profile does not declare it
 
 #### Connector Settings

@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 import { CapCapabilitiesPacket, Cmd, ControlPacket, LoginPacket, LoginResponsePacket, RadioCapPacket, Sizes, StatusPacket, TokenPacket, TokenType, ConnInfoPacket, AUDIO_SAMPLE_RATE, XIEGU_TX_BUFFER_SIZE, PingPacket, CivPacket } from '../core/IcomPackets';
 import { dbg, dbgV } from '../utils/debug';
 import { Session } from '../core/Session';
-import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SquelchStatusReading, AudioSquelchReading, OvfStatusReading, PowerLevelReading, CompLevelReading, VoltageReading, CurrentReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics, DisconnectReason, DisconnectOptions, TunerStatusReading, TunerState, LevelReading, IcomScopeSpanInfo, IcomScopeMode, IcomScopeModeInfo, IcomScopeEdgeInfo, IcomScopeFixedEdgeInfo, IcomSpectrumDisplayState, IcomSpectrumDisplayConfig, IcomModelId } from '../types';
+import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SquelchStatusReading, AudioSquelchReading, OvfStatusReading, PowerLevelReading, CompLevelReading, VoltageReading, CurrentReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics, DisconnectReason, DisconnectOptions, TunerStatusReading, TunerState, LevelReading, IcomScopeSpanInfo, IcomScopeMode, IcomScopeModeInfo, IcomScopeEdgeInfo, IcomScopeFixedEdgeInfo, IcomSpectrumDisplayState, IcomSpectrumDisplayConfig, IcomModelId, IcomFunctionName, IcomLevelName, IcomParameterName, IcomVfoName, IcomVfoOperation, IcomRepeaterShift, IcomSpectrumSpeed, IcomSpectrumCenterType, IcomAudioIfSource } from '../types';
 import { IcomCiv } from './IcomCiv';
 import { IcomAudio } from './IcomAudio';
 import { IcomRigCommands } from './IcomRigCommands';
@@ -13,9 +13,9 @@ import { rawToSMeter } from '../utils/smeter';
 import { IcomScopeCommands } from '../scope/IcomScopeCommands';
 import { parseIcomBcdFreqLE } from '../scope/IcomScopeParser';
 import { IcomScopeService } from '../scope/IcomScopeService';
-import { decodeBcdBE, decodeFrequencyBcdLE } from './IcomCivFrame';
+import { decodeBcdBE, decodeFrequencyBcdLE, encodeBcdBE, encodeFrequencyBcdLE } from './IcomCivFrame';
 import { CIV } from './IcomCivSpec';
-import { IcomProfile, getProfileByModel, interpolateCalibration, resolveIcomProfile } from './IcomProfiles';
+import { IcomExtParam, IcomProfile, getProfileByModel, interpolateCalibration, resolveIcomProfile } from './IcomProfiles';
 import { IcomCivRequestManager } from './IcomCivRequestManager';
 
 const DEFAULT_SCOPE_SPANS_HZ = [25000000, 10000000, 5000000, 2500000, 1000000, 500000, 250000, 100000, 50000, 25000, 10000, 5000, 2500] as const;
@@ -37,6 +37,92 @@ function modeNameToCode(mode: IcomScopeMode): 0 | 1 | 2 | 3 {
     case 'scroll-fixed': return 3;
   }
 }
+
+type LevelSpec = {
+  command: number;
+  subcmd: number;
+  dataBytes: number;
+  dataType: IcomExtParam['dataType'];
+  publicToRaw?: (value: number) => number;
+  rawToPublic?: (raw: number) => number;
+};
+
+const FUNCTION_SPECS: Partial<Record<IcomFunctionName, { command: number; subcmd: number; payloadPrefix?: number[]; readPrefix?: number[] }>> = {
+  NB: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_FUNC_NB },
+  NR: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_FUNC_NR },
+  COMP: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_FUNC_COMP },
+  VOX: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_FUNC_VOX },
+  TONE: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_FUNC_TONE },
+  TSQL: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_FUNC_TSQL },
+  SBKIN: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_FUNC_BKIN },
+  FBKIN: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_FUNC_BKIN },
+  MON: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_FUNC_MON },
+  ANF: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_FUNC_ANF },
+  MN: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_FUNC_MN },
+  LOCK: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_FUNC_DIAL_LK },
+  RIT: { command: CIV.C_CTL_RIT, subcmd: CIV.S_RIT },
+  XIT: { command: CIV.C_CTL_RIT, subcmd: CIV.S_XIT },
+  TUNER: { command: CIV.C_CTL_PTT, subcmd: CIV.S_ANT_TUN },
+  APF: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_FUNC_APF },
+  AFC: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_FUNC_AFC },
+  VSC: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_FUNC_VSC },
+  DUAL_WATCH: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_MEM_DUALMODE },
+  SATMODE: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_MEM_SATMODE },
+  SCOPE: { command: CIV.C_CTL_SCP, subcmd: CIV.S_SCP_STS },
+  SPECTRUM: { command: CIV.C_CTL_SCP, subcmd: CIV.S_SCP_DOP },
+  SPECTRUM_HOLD: { command: CIV.C_CTL_SCP, subcmd: CIV.S_SCP_HLD, payloadPrefix: [0], readPrefix: [0] },
+  OVF_STATUS: { command: CIV.C_RD_SQSM, subcmd: CIV.S_OVF },
+  DIGI_SEL: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_FUNC_DIGISEL },
+  IPP: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_FUNC_IPP },
+  TX_INHIBIT: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_FUNC_TX_INHIBIT },
+  DPP: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_FUNC_DPP },
+};
+
+function keySpeedWpmToRaw(wpm: number): number {
+  const target = Math.max(6, Math.min(48, Math.round(wpm)));
+  return CW_LOOKUP.find(([, speed]) => speed === target)?.[0] ?? CW_LOOKUP[0][0];
+}
+
+function keySpeedRawToWpm(raw: number): number {
+  return CW_LOOKUP.find(([rigValue]) => rigValue >= raw)?.[1] ?? 48;
+}
+
+const LEVEL_SPECS: Partial<Record<IcomLevelName, LevelSpec>> = {
+  AF: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_AF, dataBytes: 2, dataType: 'level' },
+  RF: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_RF, dataBytes: 2, dataType: 'level' },
+  SQL: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_SQL, dataBytes: 2, dataType: 'level' },
+  IF: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_IF, dataBytes: 2, dataType: 'level' },
+  APF: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_APF, dataBytes: 2, dataType: 'level' },
+  NR: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_NR, dataBytes: 2, dataType: 'level' },
+  NB: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_NB, dataBytes: 2, dataType: 'level' },
+  PBT_IN: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_PBTIN, dataBytes: 2, dataType: 'level' },
+  PBT_OUT: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_PBTOUT, dataBytes: 2, dataType: 'level' },
+  CWPITCH: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_CWPITCH, dataBytes: 2, dataType: 'int', publicToRaw: (hz) => Math.round((Math.max(300, Math.min(900, hz)) - 300) * 255 / 600), rawToPublic: (raw) => Math.round(300 + raw * 600 / 255) },
+  RFPOWER: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_RFPOWER, dataBytes: 2, dataType: 'level' },
+  MICGAIN: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_MICGAIN, dataBytes: 2, dataType: 'level' },
+  KEYSPD: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_KEYSPD, dataBytes: 2, dataType: 'int', publicToRaw: keySpeedWpmToRaw, rawToPublic: keySpeedRawToWpm },
+  NOTCHF_RAW: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_NOTCHF, dataBytes: 2, dataType: 'level' },
+  COMP: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_COMP, dataBytes: 2, dataType: 'level' },
+  BKINDL: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_BKINDL, dataBytes: 2, dataType: 'level' },
+  BALANCE: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_BALANCE, dataBytes: 2, dataType: 'level' },
+  VOXGAIN: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_VOXGAIN, dataBytes: 2, dataType: 'level' },
+  ANTIVOX: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_ANTIVOX, dataBytes: 2, dataType: 'level' },
+  MONITOR_GAIN: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_MON, dataBytes: 2, dataType: 'level' },
+  DRIVE_GAIN: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_DRIVE, dataBytes: 2, dataType: 'level' },
+  DIGI_SEL_LEVEL: { command: CIV.C_CTL_LVL, subcmd: CIV.S_LVL_DIGI, dataBytes: 2, dataType: 'level' },
+  AGC: { command: CIV.C_CTL_FUNC, subcmd: CIV.S_FUNC_AGC, dataBytes: 1, dataType: 'int' },
+  AGC_TIME: { command: CIV.C_CTL_MEM, subcmd: 0x04, dataBytes: 1, dataType: 'int' },
+};
+
+const CW_LOOKUP: Array<[number, number]> = [
+  [0, 6], [7, 7], [12, 8], [19, 9], [25, 10], [31, 11], [37, 12], [43, 13],
+  [49, 14], [55, 15], [61, 16], [67, 17], [73, 18], [79, 19], [84, 20],
+  [91, 21], [97, 22], [103, 23], [108, 24], [114, 25], [121, 26], [128, 27],
+  [134, 28], [140, 29], [144, 30], [151, 31], [156, 32], [164, 33],
+  [169, 34], [175, 35], [182, 36], [188, 37], [192, 38], [199, 39],
+  [203, 40], [211, 41], [215, 42], [224, 43], [229, 44], [234, 45],
+  [239, 46], [244, 47], [250, 48],
+];
 
 export class IcomControl {
   private ev: RigEventEmitter = new EventEmitter() as RigEventEmitter;
@@ -1607,6 +1693,609 @@ export class IcomControl {
       raw,
       amps: interpolateCalibration(raw, this.activeProfile.calibrations.current)
     };
+  }
+
+  async getFunction(name: IcomFunctionName, options?: QueryOptions): Promise<boolean | null> {
+    if (!this.activeProfile.functions.includes(name)) return null;
+    const ext = this.activeProfile.extParamSpecs[name];
+    if (ext) {
+      const value = await this.readExtParamValue(ext, `func-ext:${name}`, options);
+      return value === null ? null : value !== 0;
+    }
+    const spec = FUNCTION_SPECS[name];
+    if (!spec) return null;
+    const raw = await this.readFunctionRaw(name, spec, options);
+    if (raw === null) return null;
+    if (name === 'SBKIN') return raw === 1;
+    if (name === 'FBKIN') return raw === 2;
+    return raw !== 0;
+  }
+
+  setFunction(name: IcomFunctionName, enabled: boolean): void {
+    if (!this.activeProfile.functions.includes(name)) {
+      throw this.unsupported(name, 'setFunction', 'Function is not enabled for active profile');
+    }
+    const ext = this.activeProfile.extParamSpecs[name];
+    if (ext) {
+      this.writeExtParamValue(ext, enabled ? 1 : 0);
+      return;
+    }
+    const spec = FUNCTION_SPECS[name];
+    if (!spec || name === 'OVF_STATUS') {
+      throw this.unsupported(name, 'setFunction', 'Function is read-only or has no CI-V writer');
+    }
+    let value = enabled ? 1 : 0;
+    if (name === 'SBKIN') value = enabled ? 1 : 0;
+    if (name === 'FBKIN') value = enabled ? 2 : 0;
+    this.writeFunctionRaw(spec, value);
+  }
+
+  async getLevel(name: IcomLevelName, options?: QueryOptions): Promise<number | null> {
+    if (!this.activeProfile.levels.includes(name)) return null;
+    const ext = this.activeProfile.extParamSpecs[name];
+    if (ext) {
+      return this.readExtParamValue(ext, `level-ext:${name}`, options);
+    }
+    const spec = LEVEL_SPECS[name];
+    if (!spec) return null;
+    const raw = await this.readLevelRaw(name, spec, options);
+    if (raw === null) return null;
+    return spec.rawToPublic ? spec.rawToPublic(raw) : spec.dataType === 'level' ? raw / 255 : raw;
+  }
+
+  setLevel(name: IcomLevelName, value: number): void {
+    if (!this.activeProfile.levels.includes(name)) {
+      throw this.unsupported(name, 'setLevel', 'Level is not enabled for active profile');
+    }
+    const ext = this.activeProfile.extParamSpecs[name];
+    if (ext) {
+      this.writeExtParamValue(ext, value);
+      return;
+    }
+    const spec = LEVEL_SPECS[name];
+    if (!spec) {
+      throw this.unsupported(name, 'setLevel', 'No level command mapping');
+    }
+    const raw = spec.publicToRaw
+      ? spec.publicToRaw(value)
+      : spec.dataType === 'level'
+        ? Math.round(Math.max(0, Math.min(1, value)) * 255)
+        : Math.round(value);
+    this.writeLevelRaw(spec, raw);
+  }
+
+  async getParameter(name: IcomParameterName, options?: QueryOptions): Promise<number | boolean | null> {
+    if (!this.activeProfile.parameters.includes(name)) return null;
+    const ext = this.activeProfile.extParamSpecs[name];
+    if (!ext) return null;
+    const value = await this.readExtParamValue(ext, `parm:${name}`, options);
+    if (value === null) return null;
+    return ext.dataType === 'bool' ? value !== 0 : value;
+  }
+
+  setParameter(name: IcomParameterName, value: number | boolean): void {
+    if (!this.activeProfile.parameters.includes(name)) {
+      throw this.unsupported(name, 'setParameter', 'Parameter is not enabled for active profile');
+    }
+    const ext = this.activeProfile.extParamSpecs[name];
+    if (!ext) {
+      throw this.unsupported(name, 'setParameter', 'No parameter command mapping');
+    }
+    this.writeExtParamValue(ext, typeof value === 'boolean' ? (value ? 1 : 0) : value);
+  }
+
+  async getNoiseBlankerEnabled(options?: QueryOptions) { return this.getFunction('NB', options); }
+  setNoiseBlankerEnabled(enabled: boolean) { this.setFunction('NB', enabled); }
+  async getNoiseReductionEnabled(options?: QueryOptions) { return this.getFunction('NR', options); }
+  setNoiseReductionEnabled(enabled: boolean) { this.setFunction('NR', enabled); }
+  async getCompressorEnabled(options?: QueryOptions) { return this.getFunction('COMP', options); }
+  setCompressorEnabled(enabled: boolean) { this.setFunction('COMP', enabled); }
+  async getVoxEnabled(options?: QueryOptions) { return this.getFunction('VOX', options); }
+  setVoxEnabled(enabled: boolean) { this.setFunction('VOX', enabled); }
+  async getMonitorEnabled(options?: QueryOptions) { return this.getFunction('MON', options); }
+  setMonitorEnabled(enabled: boolean) { this.setFunction('MON', enabled); }
+  async getAutoNotchEnabled(options?: QueryOptions) { return this.getFunction('ANF', options); }
+  setAutoNotchEnabled(enabled: boolean) { this.setFunction('ANF', enabled); }
+  async getManualNotchEnabled(options?: QueryOptions) { return this.getFunction('MN', options); }
+  setManualNotchEnabled(enabled: boolean) { this.setFunction('MN', enabled); }
+  async getDialLockEnabled(options?: QueryOptions) { return this.getFunction('LOCK', options); }
+  setDialLockEnabled(enabled: boolean) { this.setFunction('LOCK', enabled); }
+
+  async getBreakInMode(options?: QueryOptions): Promise<'off' | 'semi' | 'full' | null> {
+    const spec = FUNCTION_SPECS.SBKIN;
+    if (!spec || !this.activeProfile.functions.includes('SBKIN')) return null;
+    const raw = await this.readFunctionRaw('SBKIN', spec, options);
+    if (raw === null) return null;
+    return raw === 1 ? 'semi' : raw === 2 ? 'full' : 'off';
+  }
+
+  setBreakInMode(mode: 'off' | 'semi' | 'full'): void {
+    const spec = FUNCTION_SPECS.SBKIN;
+    if (!spec || !this.activeProfile.functions.includes('SBKIN')) {
+      throw this.unsupported('SBKIN', 'setBreakInMode', 'Break-in function is not enabled for active profile');
+    }
+    this.writeFunctionRaw(spec, mode === 'semi' ? 1 : mode === 'full' ? 2 : 0);
+  }
+
+  async getRFGain(options?: QueryOptions) { return this.getLevel('RF', options); }
+  setRFGain(value: number) { this.setLevel('RF', value); }
+  async getIFShift(options?: QueryOptions) { return this.getLevel('IF', options); }
+  setIFShift(value: number) { this.setLevel('IF', value); }
+  async getPbtIn(options?: QueryOptions) { return this.getLevel('PBT_IN', options); }
+  setPbtIn(value: number) { this.setLevel('PBT_IN', value); }
+  async getPbtOut(options?: QueryOptions) { return this.getLevel('PBT_OUT', options); }
+  setPbtOut(value: number) { this.setLevel('PBT_OUT', value); }
+  async getCwPitch(options?: QueryOptions) { return this.getLevel('CWPITCH', options); }
+  setCwPitch(hz: number) { this.setLevel('CWPITCH', hz); }
+  async getKeySpeed(options?: QueryOptions) { return this.getLevel('KEYSPD', options); }
+  setKeySpeed(wpm: number) { this.setLevel('KEYSPD', wpm); }
+  async getNotchRaw(options?: QueryOptions) { return this.getLevel('NOTCHF_RAW', options); }
+  setNotchRaw(value: number) { this.setLevel('NOTCHF_RAW', value); }
+  async getCompressionLevel(options?: QueryOptions) { return this.getLevel('COMP', options); }
+  setCompressionLevel(value: number) { this.setLevel('COMP', value); }
+  async getMonitorGain(options?: QueryOptions) { return this.getLevel('MONITOR_GAIN', options); }
+  setMonitorGain(value: number) { this.setLevel('MONITOR_GAIN', value); }
+  async getVoxGain(options?: QueryOptions) { return this.getLevel('VOXGAIN', options); }
+  setVoxGain(value: number) { this.setLevel('VOXGAIN', value); }
+  async getAntiVox(options?: QueryOptions) { return this.getLevel('ANTIVOX', options); }
+  setAntiVox(value: number) { this.setLevel('ANTIVOX', value); }
+
+  async getRitOffset(options?: QueryOptions) { return this.readRitOffset(options); }
+  setRitOffset(offsetHz: number) { this.writeRitOffset(offsetHz); }
+  async getXitOffset(options?: QueryOptions) { return this.readRitOffset(options); }
+  setXitOffset(offsetHz: number) { this.writeRitOffset(offsetHz); }
+  async getRitEnabled(options?: QueryOptions) { return this.getFunction('RIT', options); }
+  setRitEnabled(enabled: boolean) { this.setFunction('RIT', enabled); }
+  async getXitEnabled(options?: QueryOptions) { return this.getFunction('XIT', options); }
+  setXitEnabled(enabled: boolean) { this.setFunction('XIT', enabled); }
+
+  async getVfo(options?: QueryOptions): Promise<IcomVfoName | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.readCommand(ctrAddr, rigAddr, CIV.C_SET_VFO, CIV.S_BAND_SEL);
+    const resp = await this.waitForCivFrame('vfo:0x07:0xd2', (frame) => IcomControl.matchCommandFrame(frame, CIV.C_SET_VFO, [CIV.S_BAND_SEL], ctrAddr, rigAddr), timeoutMs, () => this.sendCiv(req));
+    if (!resp || resp.length < 8) return null;
+    return resp[6] === 0 ? 'MAIN' : 'SUB';
+  }
+
+  setVfo(vfo: IcomVfoName): void {
+    const subcmd = this.vfoToSubcmd(vfo);
+    if (subcmd === null) {
+      throw this.unsupported(vfo, 'setVfo', 'VFO cannot be directly selected');
+    }
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    this.sendCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_SET_VFO, subcmd));
+  }
+
+  vfoOperation(op: IcomVfoOperation): void {
+    if (!this.activeProfile.vfoOps.includes(op)) {
+      throw this.unsupported(op, 'vfoOperation', 'VFO operation is not enabled for active profile');
+    }
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    switch (op) {
+      case 'copy':
+        this.sendCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_SET_VFO, CIV.S_BTOA));
+        return;
+      case 'exchange':
+        this.sendCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_SET_VFO, CIV.S_XCHNG));
+        return;
+      case 'from-vfo':
+        this.sendCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_WR_MEM, undefined));
+        return;
+      case 'to-vfo':
+        this.sendCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_MEM2VFO, undefined));
+        return;
+      case 'memory-clear':
+        this.sendCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_CLR_MEM, undefined));
+        return;
+      case 'tune':
+        this.sendCiv(IcomRigCommands.startManualTune(ctrAddr, rigAddr));
+        return;
+    }
+  }
+
+  async getSplitEnabled(options?: QueryOptions): Promise<boolean | null> {
+    const raw = await this.readSplitRaw(options);
+    if (raw === null) return null;
+    return raw === CIV.S_SPLT_ON;
+  }
+
+  setSplitEnabled(enabled: boolean): void {
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    this.sendCiv(IcomRigCommands.setSplit(ctrAddr, rigAddr, enabled));
+  }
+
+  async getSplitFrequency(options?: QueryOptions): Promise<number | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.readSelectedFrequency(ctrAddr, rigAddr, 1);
+    const resp = await this.waitForCivFrame('freq:0x25:1', (frame) => IcomControl.matchCommandFrame(frame, CIV.C_SEND_SEL_FREQ, [0x01], ctrAddr, rigAddr), timeoutMs, () => this.sendCiv(req));
+    return resp ? IcomControl.parseFrequencyReply(resp, 1) : null;
+  }
+
+  setSplitFrequency(hz: number): void {
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    this.sendCiv(IcomRigCommands.setSelectedFrequency(ctrAddr, rigAddr, hz, this.activeProfile.frequencyBcdBytes(hz), 1));
+  }
+
+  async getSplitMode(options?: QueryOptions): Promise<{ mode: number; filter?: number; modeName?: string; filterName?: string; dataMode?: boolean } | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.readSelectedMode(ctrAddr, rigAddr, 1);
+    const resp = await this.waitForCivFrame('mode:0x26:1', (frame) => IcomControl.matchCommandFrame(frame, CIV.C_SEND_SEL_MODE, [0x01], ctrAddr, rigAddr), timeoutMs, () => this.sendCiv(req));
+    if (!resp || resp.length < 10) return null;
+    const { getModeString, getFilterString } = await import('./IcomConstants');
+    const mode = resp[6];
+    const dataMode = resp[7] !== 0x00;
+    const filter = resp[8];
+    return { mode, filter, dataMode, modeName: getModeString(mode), filterName: getFilterString(filter) };
+  }
+
+  setSplitMode(mode: IcomMode | number, options?: SetModeOptions): void {
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const modeCode = typeof mode === 'string' ? getModeCode(mode) : mode;
+    const filter = options?.filter ?? this.lastFilter ?? this.activeProfile.defaultFilter;
+    this.sendCiv(IcomRigCommands.setSelectedMode(ctrAddr, rigAddr, modeCode, !!options?.dataMode, filter, 1));
+  }
+
+  async getTuningStep(options?: QueryOptions): Promise<number | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.readTuningStep(ctrAddr, rigAddr);
+    const resp = await this.waitForCivFrame('ts:0x10', (frame) => IcomControl.matchCommandFrame(frame, CIV.C_SET_TS, [], ctrAddr, rigAddr), timeoutMs, () => this.sendCiv(req));
+    if (!resp || resp.length < 7) return null;
+    return this.activeProfile.tuningSteps.find((step) => step.code === resp[5])?.hz ?? null;
+  }
+
+  setTuningStep(hz: number): void {
+    const matched = this.activeProfile.tuningSteps.find((step) => step.hz === hz);
+    if (!matched) {
+      throw this.unsupported(String(hz), 'setTuningStep', 'Tuning step is not enabled for active profile');
+    }
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    this.sendCiv(IcomRigCommands.setTuningStep(ctrAddr, rigAddr, matched.code));
+  }
+
+  async getRepeaterShift(options?: QueryOptions): Promise<IcomRepeaterShift | null> {
+    const raw = await this.readSplitRaw(options);
+    if (raw === null) return null;
+    if (raw === CIV.S_DUP_M) return 'minus';
+    if (raw === CIV.S_DUP_P) return 'plus';
+    return 'none';
+  }
+
+  setRepeaterShift(shift: IcomRepeaterShift): void {
+    if (!this.activeProfile.repeater) {
+      throw this.unsupported(shift, 'setRepeaterShift', 'Repeater controls are not enabled for active profile');
+    }
+    const code = shift === 'minus' ? CIV.S_DUP_M : shift === 'plus' ? CIV.S_DUP_P : CIV.S_DUP_OFF;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    this.sendCiv(IcomRigCommands.setRepeaterShift(ctrAddr, rigAddr, code));
+  }
+
+  async getRepeaterOffset(options?: QueryOptions): Promise<number | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.readCommand(ctrAddr, rigAddr, CIV.C_RD_OFFS);
+    const resp = await this.waitForCivFrame('rptr:offset', (frame) => IcomControl.matchCommandFrame(frame, CIV.C_RD_OFFS, [], ctrAddr, rigAddr), timeoutMs, () => this.sendCiv(req));
+    if (!resp || resp.length < 9) return null;
+    return decodeFrequencyBcdLE(resp.subarray(5, 8)) * 100;
+  }
+
+  setRepeaterOffset(offsetHz: number): void {
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    this.sendCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_SET_OFFS, undefined, encodeFrequencyBcdLE(Math.round(offsetHz / 100), 3)));
+  }
+
+  async getToneFrequency(options?: QueryOptions) { return this.readTone(CIV.S_TONE_RPTR, options); }
+  setToneFrequency(hz: number) { this.writeTone(CIV.S_TONE_RPTR, hz); }
+  async getToneSquelchFrequency(options?: QueryOptions) { return this.readTone(CIV.S_TONE_SQL, options); }
+  setToneSquelchFrequency(hz: number) { this.writeTone(CIV.S_TONE_SQL, hz); }
+
+  async getBeepEnabled(options?: QueryOptions) { return this.getParameter('BEEP', options) as Promise<boolean | null>; }
+  setBeepEnabled(enabled: boolean) { this.setParameter('BEEP', enabled); }
+  async getBacklight(options?: QueryOptions) { return this.getParameter('BACKLIGHT', options) as Promise<number | null>; }
+  setBacklight(value: number) { this.setParameter('BACKLIGHT', value); }
+  async getScreenSaver(options?: QueryOptions) { return this.getParameter('SCREENSAVER', options) as Promise<number | null>; }
+  setScreenSaver(value: number) { this.setParameter('SCREENSAVER', value); }
+  async getKeyerType(options?: QueryOptions) { return this.getParameter('KEYERTYPE', options) as Promise<number | null>; }
+  setKeyerType(value: number) { this.setParameter('KEYERTYPE', value); }
+
+  async getAudioIfMode(options?: QueryOptions): Promise<IcomAudioIfSource | null> {
+    for (const source of ['wlan', 'lan', 'acc'] as IcomAudioIfSource[]) {
+      const parm = this.audioIfSourceToParameter(source);
+      if (parm && this.activeProfile.parameters.includes(parm)) {
+        const enabled = await this.getParameter(parm, options);
+        if (enabled === true) return source;
+      }
+    }
+    return this.activeProfile.audioIfSources.includes('default') ? 'default' : null;
+  }
+
+  setAudioIfMode(source: IcomAudioIfSource): void {
+    if (!this.activeProfile.audioIfSources.includes(source)) {
+      throw this.unsupported(source, 'setAudioIfMode', 'Audio IF source is not enabled for active profile');
+    }
+    for (const candidate of ['wlan', 'lan', 'acc'] as IcomAudioIfSource[]) {
+      const parm = this.audioIfSourceToParameter(candidate);
+      if (parm && this.activeProfile.parameters.includes(parm)) {
+        this.setParameter(parm, source === candidate);
+      }
+    }
+    if (this.activeProfile.parameters.includes('AFIF')) {
+      this.setParameter('AFIF', source !== 'default');
+    }
+  }
+
+  async getSpectrumDataOutput(options?: QueryOptions): Promise<boolean | null> {
+    return this.getScopeBoolean(CIV.S_SCP_DOP, [], 'spectrum:data-output', options);
+  }
+  setSpectrumDataOutput(enabled: boolean): void { this.writeScopeSimple(CIV.S_SCP_DOP, [enabled ? 1 : 0]); }
+  async getSpectrumHold(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<boolean | null> {
+    const receiver = options?.receiver ?? 0;
+    return this.getScopeBoolean(CIV.S_SCP_HLD, [receiver], `spectrum:hold:${receiver}`, options);
+  }
+  setSpectrumHold(enabled: boolean, options?: { receiver?: 0 | 1 }): void {
+    const receiver = options?.receiver ?? 0;
+    this.writeScopeSimple(CIV.S_SCP_HLD, [receiver, enabled ? 1 : 0]);
+  }
+  async getSpectrumSpeed(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<IcomSpectrumSpeed | null> {
+    const receiver = options?.receiver ?? 0;
+    const raw = await this.getScopeByte(CIV.S_SCP_SWP, [receiver], `spectrum:speed:${receiver}`, options);
+    if (raw === null) return null;
+    return raw === 0 ? 'fast' : raw === 1 ? 'mid' : 'slow';
+  }
+  setSpectrumSpeed(speed: IcomSpectrumSpeed, options?: { receiver?: 0 | 1 }): void {
+    const receiver = options?.receiver ?? 0;
+    const raw = speed === 'fast' ? 0 : speed === 'mid' ? 1 : 2;
+    this.writeScopeSimple(CIV.S_SCP_SWP, [receiver, raw]);
+  }
+  async getSpectrumRef(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<number | null> {
+    const receiver = options?.receiver ?? 0;
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.readCommand(ctrAddr, rigAddr, CIV.C_CTL_SCP, CIV.S_SCP_REF, [receiver]);
+    const resp = await this.waitForCivFrame(`spectrum:ref:${receiver}`, (frame) => IcomControl.matchCommandFrame(frame, CIV.C_CTL_SCP, [CIV.S_SCP_REF, receiver], ctrAddr, rigAddr), timeoutMs, () => this.sendCiv(req));
+    if (!resp || resp.length < 10) return null;
+    const value = decodeBcdBE(resp.subarray(7, 9)) / 100;
+    return resp[9] ? -value : value;
+  }
+  setSpectrumRef(db: number, options?: { receiver?: 0 | 1 }): void {
+    const receiver = options?.receiver ?? 0;
+    const rounded = Math.round(db * 2) / 2;
+    this.writeScopeSimple(CIV.S_SCP_REF, [receiver, ...encodeBcdBE(Math.abs(Math.round(rounded * 100)), 2), rounded < 0 ? 1 : 0]);
+  }
+  async getSpectrumAverage(options?: QueryOptions): Promise<number | null> { return this.getLevel('SPECTRUM_AVG', options); }
+  setSpectrumAverage(value: number): void { this.setLevel('SPECTRUM_AVG', value); }
+  async getSpectrumVbw(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<number | null> {
+    const receiver = options?.receiver ?? 0;
+    return this.getScopeByte(CIV.S_SCP_VBW, [receiver], `spectrum:vbw:${receiver}`, options);
+  }
+  setSpectrumVbw(value: number, options?: { receiver?: 0 | 1 }): void {
+    const receiver = options?.receiver ?? 0;
+    this.writeScopeSimple(CIV.S_SCP_VBW, [receiver, Math.max(0, Math.min(1, Math.trunc(value)))]);
+  }
+  async getSpectrumRbw(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<number | null> {
+    const receiver = options?.receiver ?? 0;
+    return this.getScopeByte(CIV.S_SCP_RBW, [receiver], `spectrum:rbw:${receiver}`, options);
+  }
+  setSpectrumRbw(value: number, options?: { receiver?: 0 | 1 }): void {
+    const receiver = options?.receiver ?? 0;
+    this.writeScopeSimple(CIV.S_SCP_RBW, [receiver, Math.max(0, Math.min(2, Math.trunc(value)))]);
+  }
+  async getSpectrumDuringTx(options?: QueryOptions): Promise<boolean | null> {
+    return this.getScopeBoolean(CIV.S_SCP_STX, [], 'spectrum:during-tx', options);
+  }
+  setSpectrumDuringTx(enabled: boolean): void { this.writeScopeSimple(CIV.S_SCP_STX, [enabled ? 1 : 0]); }
+  async getSpectrumCenterType(options?: QueryOptions): Promise<IcomSpectrumCenterType | null> {
+    const raw = await this.getScopeByte(CIV.S_SCP_CFQ, [], 'spectrum:center-type', options);
+    if (raw === null) return null;
+    return raw === 1 ? 'carrier-point-center' : raw === 2 ? 'carrier-point-center-abs' : 'filter-center';
+  }
+  setSpectrumCenterType(type: IcomSpectrumCenterType): void {
+    const raw = type === 'carrier-point-center' ? 1 : type === 'carrier-point-center-abs' ? 2 : 0;
+    this.writeScopeSimple(CIV.S_SCP_CFQ, [raw]);
+  }
+
+  private unsupported(commandName: string, api: string, reason: string) {
+    return new UnsupportedCommandError({
+      modelId: this.getProfileModelId(),
+      commandName: api,
+      civCommand: commandName,
+      reason,
+    });
+  }
+
+  private async readFunctionRaw(name: IcomFunctionName, spec: { command: number; subcmd: number; readPrefix?: number[] }, options?: QueryOptions): Promise<number | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const prefix = spec.readPrefix ?? [];
+    const req = IcomRigCommands.readCommand(ctrAddr, rigAddr, spec.command, spec.subcmd, prefix);
+    const tail = [spec.subcmd, ...prefix];
+    const resp = await this.waitForCivFrame(`func:0x${spec.command.toString(16)}:0x${spec.subcmd.toString(16)}:${prefix.join('.')}:${name}`,
+      (frame) => IcomControl.matchCommandFrame(frame, spec.command, tail, ctrAddr, rigAddr), timeoutMs, () => this.sendCiv(req));
+    if (!resp) return null;
+    const index = 5 + tail.length;
+    return index < resp.length - 1 ? resp[index] : null;
+  }
+
+  private writeFunctionRaw(spec: { command: number; subcmd: number; payloadPrefix?: number[] }, value: number): void {
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const payload = [...(spec.payloadPrefix ?? []), value & 0xff];
+    this.sendCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, spec.command, spec.subcmd, payload));
+  }
+
+  private async readLevelRaw(name: IcomLevelName, spec: LevelSpec, options?: QueryOptions): Promise<number | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.readCommand(ctrAddr, rigAddr, spec.command, spec.subcmd);
+    const resp = await this.waitForCivFrame(`level:0x${spec.command.toString(16)}:0x${spec.subcmd.toString(16)}:${name}`,
+      (frame) => IcomControl.matchCommandFrame(frame, spec.command, [spec.subcmd], ctrAddr, rigAddr), timeoutMs, () => this.sendCiv(req));
+    if (!resp) return null;
+    const data = resp.subarray(6, resp.length - 1);
+    if (data.length < spec.dataBytes) return null;
+    return decodeBcdBE(data.subarray(0, spec.dataBytes));
+  }
+
+  private writeLevelRaw(spec: LevelSpec, raw: number): void {
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    this.sendCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, spec.command, spec.subcmd, IcomControl.encodeDataValue(raw, spec.dataType, spec.dataBytes)));
+  }
+
+  private async readExtParamValue(ext: IcomExtParam, keyPrefix: string, options?: QueryOptions): Promise<number | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.readExtParam(ctrAddr, rigAddr, ext.command, ext.subcmd, ext.subext);
+    const tail = [ext.subcmd, ...ext.subext];
+    const resp = await this.waitForCivFrame(`${keyPrefix}:0x${ext.command.toString(16)}:0x${ext.subcmd.toString(16)}:${ext.subext.join('.')}`,
+      (frame) => IcomControl.matchCommandFrame(frame, ext.command, tail, ctrAddr, rigAddr), timeoutMs, () => this.sendCiv(req));
+    if (!resp) return null;
+    const start = 5 + tail.length;
+    return IcomControl.decodeDataValue(resp.subarray(start, resp.length - 1), ext.dataType, ext.dataBytes);
+  }
+
+  private writeExtParamValue(ext: IcomExtParam, value: number): void {
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const raw = ext.dataType === 'level' ? Math.round(Math.max(0, Math.min(1, value)) * 255) : Math.round(value);
+    const payload = IcomControl.encodeDataValue(raw, ext.dataType, ext.dataBytes);
+    this.sendCiv(IcomRigCommands.writeExtParam(ctrAddr, rigAddr, ext.command, ext.subcmd, ext.subext, payload));
+  }
+
+  private static encodeDataValue(value: number, dataType: IcomExtParam['dataType'], bytes: number): Buffer {
+    if (dataType === 'time') {
+      const seconds = Math.max(0, Math.round(value));
+      const hhmm = Math.floor(seconds / 3600) * 100 + Math.floor(seconds / 60) % 60;
+      return encodeBcdBE(hhmm, bytes);
+    }
+    return encodeBcdBE(value, bytes);
+  }
+
+  private static decodeDataValue(data: Buffer, dataType: IcomExtParam['dataType'], bytes: number): number | null {
+    if (data.length < bytes) return null;
+    const value = decodeBcdBE(data.subarray(0, bytes));
+    if (dataType === 'level') return value / 255;
+    if (dataType === 'bool') return value === 0 ? 0 : 1;
+    if (dataType === 'time') {
+      const hours = Math.floor(value / 100);
+      const minutes = value % 100;
+      return hours * 3600 + minutes * 60;
+    }
+    return value;
+  }
+
+  private async readRitOffset(options?: QueryOptions): Promise<number | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.readRitOffset(ctrAddr, rigAddr);
+    const resp = await this.waitForCivFrame('rit:offset', (frame) => IcomControl.matchCommandFrame(frame, CIV.C_CTL_RIT, [CIV.S_RIT_FREQ], ctrAddr, rigAddr), timeoutMs, () => this.sendCiv(req));
+    if (!resp || resp.length < 9) return null;
+    const value = decodeFrequencyBcdLE(resp.subarray(6, 8));
+    return resp[8] === 0 ? value : -value;
+  }
+
+  private writeRitOffset(offsetHz: number): void {
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const payload = [...encodeFrequencyBcdLE(Math.abs(Math.round(offsetHz)), 2), offsetHz < 0 ? 1 : 0];
+    this.sendCiv(IcomRigCommands.setRitOffset(ctrAddr, rigAddr, payload));
+  }
+
+  private vfoToSubcmd(vfo: IcomVfoName): number | null {
+    switch (vfo) {
+      case 'A': return CIV.S_VFOA;
+      case 'B': return CIV.S_VFOB;
+      case 'MAIN':
+      case 'MAIN_A':
+      case 'MAIN_B': return CIV.S_MAIN;
+      case 'SUB':
+      case 'SUB_A':
+      case 'SUB_B': return CIV.S_SUB;
+      case 'CURR':
+      case 'TX': return null;
+      case 'MEM': return null;
+    }
+  }
+
+  private async readSplitRaw(options?: QueryOptions): Promise<number | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.readSplit(ctrAddr, rigAddr);
+    const resp = await this.waitForCivFrame('split:0x0f', (frame) => IcomControl.matchCommandFrame(frame, CIV.C_CTL_SPLT, [], ctrAddr, rigAddr), timeoutMs, () => this.sendCiv(req));
+    if (!resp || resp.length < 7) return null;
+    return resp[5];
+  }
+
+  private async readTone(subcmd: number, options?: QueryOptions): Promise<number | null> {
+    if (!this.activeProfile.tone) return null;
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.readTone(ctrAddr, rigAddr, subcmd);
+    const resp = await this.waitForCivFrame(`tone:0x${subcmd.toString(16)}`, (frame) => IcomControl.matchCommandFrame(frame, CIV.C_SET_TONE, [subcmd], ctrAddr, rigAddr), timeoutMs, () => this.sendCiv(req));
+    if (!resp || resp.length < 10) return null;
+    return decodeBcdBE(resp.subarray(6, 9)) / 10;
+  }
+
+  private writeTone(subcmd: number, hz: number): void {
+    if (!this.activeProfile.tone) {
+      throw this.unsupported(String(subcmd), 'setToneFrequency', 'Tone controls are not enabled for active profile');
+    }
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    this.sendCiv(IcomRigCommands.setTone(ctrAddr, rigAddr, subcmd, Math.round(hz * 10)));
+  }
+
+  private audioIfSourceToParameter(source: IcomAudioIfSource): IcomParameterName | null {
+    switch (source) {
+      case 'wlan': return 'AFIF_WLAN';
+      case 'lan': return 'AFIF_LAN';
+      case 'acc': return 'AFIF_ACC';
+      case 'default': return 'AFIF';
+    }
+  }
+
+  private async getScopeBoolean(subcmd: number, payload: number[], key: string, options?: QueryOptions): Promise<boolean | null> {
+    const raw = await this.getScopeByte(subcmd, payload, key, options);
+    return raw === null ? null : raw !== 0;
+  }
+
+  private async getScopeByte(subcmd: number, payload: number[], key: string, options?: QueryOptions): Promise<number | null> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const req = IcomRigCommands.readCommand(ctrAddr, rigAddr, CIV.C_CTL_SCP, subcmd, payload);
+    const resp = await this.waitForCivFrame(key, (frame) => IcomControl.matchCommandFrame(frame, CIV.C_CTL_SCP, [subcmd, ...payload], ctrAddr, rigAddr), timeoutMs, () => this.sendCiv(req));
+    if (!resp) return null;
+    const index = 5 + 1 + payload.length;
+    return index < resp.length - 1 ? resp[index] : null;
+  }
+
+  private writeScopeSimple(subcmd: number, payload: number[]): void {
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    this.sendCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_CTL_SCP, subcmd, payload));
   }
 
   private static isReplyOf(frame: Buffer, cmd: number, ctrAddr: number, rigAddr: number) {
