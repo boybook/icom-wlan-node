@@ -16,6 +16,7 @@ import { IcomScopeService } from '../scope/IcomScopeService';
 import { decodeBcdBE, decodeFrequencyBcdLE } from './IcomCivFrame';
 import { CIV } from './IcomCivSpec';
 import { IcomProfile, getProfileByModel, interpolateCalibration, resolveIcomProfile } from './IcomProfiles';
+import { IcomCivRequestManager } from './IcomCivRequestManager';
 
 const DEFAULT_SCOPE_SPANS_HZ = [25000000, 10000000, 5000000, 2500000, 1000000, 500000, 250000, 100000, 50000, 25000, 10000, 5000, 2500] as const;
 
@@ -50,6 +51,7 @@ export class IcomControl {
   private macAddress: Buffer = Buffer.alloc(6);
   private tokenTimer?: NodeJS.Timeout;
   private civAssembleBuf: Buffer = Buffer.alloc(0); // CIV stream reassembler
+  private civRequestManager: IcomCivRequestManager;
   private meterTimer?: NodeJS.Timeout;
   private activeProfile: IcomProfile = getProfileByModel('generic-modern-icom');
   private lastFilter: 1 | 2 | 3 = 1;
@@ -111,6 +113,7 @@ export class IcomControl {
     this.civ = new IcomCiv(this.civSess);
     this.audio = new IcomAudio(this.audioSess);
     this.scope = new IcomScopeService();
+    this.civRequestManager = new IcomCivRequestManager(this.ev);
     this.scope.on('scopeSegment', (segment) => this.ev.emit('scopeSegment', segment));
     this.scope.on('scopeFrame', (frame) => this.ev.emit('scopeFrame', frame));
   }
@@ -621,6 +624,7 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomScopeCommands.readScopeSpan(ctrAddr, rigAddr, receiver);
     const resp = await this.waitForCivFrame(
+      `scope:0x27:0x15:${receiver}`,
       (frame) => IcomControl.matchCommandFrame(frame, 0x27, [0x15, receiver], ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
@@ -651,6 +655,7 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomScopeCommands.readScopeMode(ctrAddr, rigAddr, receiver);
     const resp = await this.waitForCivFrame(
+      `scope:0x27:0x14:${receiver}`,
       (frame) => IcomControl.matchCommandFrame(frame, 0x27, [0x14, receiver], ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
@@ -683,6 +688,7 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomScopeCommands.readScopeEdge(ctrAddr, rigAddr, receiver);
     const resp = await this.waitForCivFrame(
+      `scope:0x27:0x16:${receiver}`,
       (frame) => IcomControl.matchCommandFrame(frame, 0x27, [0x16, receiver], ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
@@ -714,6 +720,7 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomScopeCommands.readScopeFixedEdge(ctrAddr, rigAddr, rangeId, edgeSlot);
     const resp = await this.waitForCivFrame(
+      `scope:0x27:0x1e:${rangeId}:${edgeSlot}`,
       (frame) => IcomControl.matchCommandFrame(frame, 0x27, [0x1e, rangeId, edgeSlot], ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
@@ -948,6 +955,7 @@ export class IcomControl {
       ? IcomRigCommands.readSelectedFrequency(ctrAddr, rigAddr, 0)
       : IcomRigCommands.readOperatingFrequency(ctrAddr, rigAddr);
     const resp = await this.waitForCivFrame(
+      useX25 ? 'freq:0x25:0' : 'freq:0x03',
       (frame) => useX25
         ? IcomControl.matchCommandFrame(frame, CIV.C_SEND_SEL_FREQ, [0x00], ctrAddr, rigAddr)
         : IcomControl.matchCommandFrame(frame, CIV.C_RD_FREQ, [], ctrAddr, rigAddr),
@@ -969,6 +977,7 @@ export class IcomControl {
     const useX26 = this.activeProfile.supportsX25X26 && this.activeProfile.modeWithFilter;
     const req = useX26 ? IcomRigCommands.readSelectedMode(ctrAddr, rigAddr, 0) : IcomRigCommands.readOperatingMode(ctrAddr, rigAddr);
     const resp = await this.waitForCivFrame(
+      useX26 ? 'mode:0x26:0' : 'mode:0x04',
       (frame) => useX26
         ? IcomControl.matchCommandFrame(frame, CIV.C_SEND_SEL_MODE, [0x00], ctrAddr, rigAddr)
         : IcomControl.matchCommandFrame(frame, CIV.C_RD_MODE, [], ctrAddr, rigAddr),
@@ -998,6 +1007,7 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomRigCommands.readTransmitFrequency(ctrAddr, rigAddr);
     const resp = await this.waitForCivFrame(
+      'freq:0x1c:0x03',
       (frame) => IcomControl.matchCommandFrame(frame, CIV.C_CTL_PTT, [CIV.S_RD_TX_FREQ], ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
@@ -1012,6 +1022,7 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomRigCommands.readPTT(ctrAddr, rigAddr);
     const resp = await this.waitForCivFrame(
+      'ptt:0x1c:0x00',
       (frame) => IcomControl.matchCommandFrame(frame, CIV.C_CTL_PTT, [CIV.S_PTT], ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
@@ -1036,6 +1047,7 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomRigCommands.readBandEdges(ctrAddr, rigAddr);
     const resp = await this.waitForCivFrame(
+      'band:0x02',
       (frame) => IcomControl.matchCommandFrame(frame, 0x02, [], ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
@@ -1061,6 +1073,7 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomRigCommands.getSWRState(ctrAddr, rigAddr);
     const resp = await this.waitForCivFrame(
+      'meter:0x15:0x12',
       (frame) => IcomControl.isMeterReply(frame, 0x12, ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
@@ -1092,6 +1105,7 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomRigCommands.getALCState(ctrAddr, rigAddr);
     const resp = await this.waitForCivFrame(
+      'meter:0x15:0x13',
       (frame) => IcomControl.isMeterReply(frame, 0x13, ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
@@ -1124,7 +1138,12 @@ export class IcomControl {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomRigCommands.getConnectorWLanLevel(ctrAddr, rigAddr, ext.subext);
-    const resp = await this.waitForCivFrame((frame) => IcomControl.matchCommandFrame(frame, ext.command, [ext.subcmd, ...ext.subext], ctrAddr, rigAddr), timeoutMs, () => this.sendCiv(req));
+    const resp = await this.waitForCivFrame(
+      `ext:0x${ext.command.toString(16)}:0x${ext.subcmd.toString(16)}:${ext.subext.join('.')}`,
+      (frame) => IcomControl.matchCommandFrame(frame, ext.command, [ext.subcmd, ...ext.subext], ctrAddr, rigAddr),
+      timeoutMs,
+      () => this.sendCiv(req)
+    );
 
     const raw = IcomControl.extractTrailingBcd(resp, ext.dataBytes);
     if (raw === null) return null;
@@ -1158,6 +1177,7 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomRigCommands.getLevelMeter(ctrAddr, rigAddr);
     const resp = await this.waitForCivFrame(
+      'meter:0x15:0x02',
       (frame) => IcomControl.isMeterReply(frame, 0x02, ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
@@ -1191,7 +1211,12 @@ export class IcomControl {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomRigCommands.getUsbAfLevel(ctrAddr, rigAddr, ext.subext);
-    const resp = await this.waitForCivFrame((frame) => IcomControl.matchCommandFrame(frame, ext.command, [ext.subcmd, ...ext.subext], ctrAddr, rigAddr), timeoutMs, () => this.sendCiv(req));
+    const resp = await this.waitForCivFrame(
+      `ext:0x${ext.command.toString(16)}:0x${ext.subcmd.toString(16)}:${ext.subext.join('.')}`,
+      (frame) => IcomControl.matchCommandFrame(frame, ext.command, [ext.subcmd, ...ext.subext], ctrAddr, rigAddr),
+      timeoutMs,
+      () => this.sendCiv(req)
+    );
     const raw = IcomControl.extractTrailingBcd(resp, ext.dataBytes);
     if (raw === null) return null;
     return { raw, percent: (raw / 255) * 100 };
@@ -1242,6 +1267,7 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomRigCommands.getTunerStatus(ctrAddr, rigAddr);
     const resp = await this.waitForCivFrame(
+      'tuner:0x1c:0x01',
       (frame) => IcomControl.matchCommandFrame(frame, CIV.C_CTL_PTT, [CIV.S_ANT_TUN], ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
@@ -1377,6 +1403,7 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomRigCommands.getSquelchStatus(ctrAddr, rigAddr);
     const resp = await this.waitForCivFrame(
+      'meter:0x15:0x01',
       (frame) => IcomControl.isMeterReply(frame, 0x01, ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
@@ -1407,6 +1434,7 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomRigCommands.getAudioSquelch(ctrAddr, rigAddr);
     const resp = await this.waitForCivFrame(
+      'meter:0x15:0x05',
       (frame) => IcomControl.isMeterReply(frame, 0x05, ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
@@ -1437,6 +1465,7 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomRigCommands.getOvfStatus(ctrAddr, rigAddr);
     const resp = await this.waitForCivFrame(
+      'meter:0x15:0x07',
       (frame) => IcomControl.isMeterReply(frame, 0x07, ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
@@ -1467,6 +1496,7 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomRigCommands.getPowerLevel(ctrAddr, rigAddr);
     const resp = await this.waitForCivFrame(
+      'meter:0x15:0x11',
       (frame) => IcomControl.isMeterReply(frame, 0x11, ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
@@ -1500,6 +1530,7 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomRigCommands.getCompLevel(ctrAddr, rigAddr);
     const resp = await this.waitForCivFrame(
+      'meter:0x15:0x14',
       (frame) => IcomControl.isMeterReply(frame, 0x14, ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
@@ -1532,6 +1563,7 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomRigCommands.getVoltage(ctrAddr, rigAddr);
     const resp = await this.waitForCivFrame(
+      'meter:0x15:0x15',
       (frame) => IcomControl.isMeterReply(frame, 0x15, ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
@@ -1562,6 +1594,7 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomRigCommands.getCurrent(ctrAddr, rigAddr);
     const resp = await this.waitForCivFrame(
+      'meter:0x15:0x16',
       (frame) => IcomControl.isMeterReply(frame, 0x16, ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)
@@ -1985,25 +2018,13 @@ export class IcomControl {
     }
   }
 
-  // Wait for single CI-V frame that matches predicate (fed by civFrame event)
-  private async waitForCivFrame(predicate: (frame: Buffer) => boolean, timeoutMs: number, onSend?: () => void): Promise<Buffer | null> {
-    return new Promise<Buffer | null>((resolve) => {
-      let done = false;
-      const onFrame = (frame: Buffer) => {
-        if (!done && predicate(frame)) {
-          done = true;
-          this.ev.off('civFrame', onFrame as any);
-          resolve(frame);
-        }
-      };
-      this.ev.on('civFrame', onFrame as any);
-      if (onSend) onSend();
-      setTimeout(() => {
-        if (!done) {
-          this.ev.off('civFrame', onFrame as any);
-          resolve(null);
-        }
-      }, timeoutMs);
+  // Wait for a CI-V reply by response key. Same-key queries are deduplicated.
+  private async waitForCivFrame(key: string, predicate: (frame: Buffer) => boolean, timeoutMs: number, onSend?: () => void): Promise<Buffer | null> {
+    return this.civRequestManager.query({
+      key,
+      predicate,
+      timeoutMs,
+      send: () => { if (onSend) onSend(); },
     });
   }
 
@@ -2043,6 +2064,7 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const req = IcomRigCommands.get0x14Level(ctrAddr, rigAddr, subcmd);
     const resp = await this.waitForCivFrame(
+      `level:0x14:0x${subcmd.toString(16)}`,
       (frame) => IcomControl.is0x14DataReply(frame, subcmd, ctrAddr, rigAddr),
       timeoutMs,
       () => this.sendCiv(req)

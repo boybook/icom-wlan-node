@@ -126,6 +126,27 @@ console.log({ tuner, swr, watts: power?.watts, powerPercent: power?.percent });
 
 Profile-specific behavior includes IC-905 6-byte frequency BCD above 5.85 GHz, model-specific scope fixed-edge ranges, and calibrated SWR/ALC/RF power/COMP/voltage/current meters. Private connector commands such as WLAN level or connector data mode are only enabled when the active profile declares the vendor extension; unsupported writes throw `UnsupportedCommandError`.
 
+### CI-V Query Concurrency
+
+Standard CI-V frames do not include a transaction/request ID, so the library does not add custom bytes to the CI-V payload. Instead, read/query helpers are internally deduplicated by response signature:
+
+```ts
+// Same response key: one real CI-V request, shared result
+const [a, b] = await Promise.all([
+  rig.readOperatingFrequency(),
+  rig.readOperatingFrequency()
+]);
+
+// Different response keys: concurrent requests are allowed
+const [freq, mode, ptt] = await Promise.all([
+  rig.readOperatingFrequency(),
+  rig.readOperatingMode(),
+  rig.readPtt()
+]);
+```
+
+Raw `sendCiv()` is not managed by this query layer. Write methods such as `setFrequency()`, `setMode()`, and `setPtt()` remain fire-and-forget; if your application needs write-after-read consistency, send the write first and then issue the read sequentially.
+
 ### PTT and Audio TX
 
 ```ts
