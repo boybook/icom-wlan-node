@@ -135,6 +135,15 @@ export const IcomRigCommands = {
     return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_FUNC, subcmd, payload: [...payloadPrefix, value & 0xff] });
   },
 
+  sendMorseText(ctrAddr: number, rigAddr: number, textBytes: Buffer | number[] | string): Buffer {
+    const payload = typeof textBytes === 'string' ? Buffer.from(textBytes, 'ascii') : textBytes;
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_SND_CW, payload });
+  },
+
+  stopMorse(ctrAddr: number, rigAddr: number): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_SND_CW, payload: [0xff] });
+  },
+
   readExtParam(ctrAddr: number, rigAddr: number, command: number, subcmd: number, subext: number[] = []): Buffer {
     return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: command, subcmd, payload: subext });
   },

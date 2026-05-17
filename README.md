@@ -132,6 +132,8 @@ await rig.setSplitEnabled(true);
 await rig.setSplitFrequency(7074000);
 await rig.setTuningStep(100);
 await rig.setToneFrequency(88.5);
+await rig.setMode('CW');
+await rig.sendMorse('CQ CQ DE N0CALL');
 await rig.setSpectrumSpeed('slow');
 ```
 
@@ -235,6 +237,7 @@ await rig.disableScope();
   - **Antenna Tuner**: `readTunerStatus()`, `setTunerEnabled()`, `startManualTune()`
   - **Functions**: `getFunction()`, `setFunction()`, plus wrappers for NB/NR/COMP/VOX/MON/ANF/MN/LOCK/BK-IN
   - **Levels**: `getLevel()`, `setLevel()`, plus wrappers for RF gain, IF shift, PBT, CW pitch, key speed, monitor gain, VOX gain
+  - **CW Text**: `sendMorse()`, `sendCwText()`, `stopMorse()` — Hamlib-aligned CI-V `0x17` text handoff to the rig keyer
   - **RIT/XIT + Split/VFO**: `getRitOffset()`, `setRitOffset()`, `getSplitEnabled()`, `setSplitFrequency()`, `getVfo()`, `setVfo()`, `vfoOperation()`
   - **Tone/Tuning**: `getTuningStep()`, `setTuningStep()`, `getToneFrequency()`, `setToneFrequency()`, `getRepeaterShift()`, `setRepeaterOffset()`
   - **Meters (RX)**: `readSquelchStatus()`, `readAudioSquelch()`, `readOvfStatus()`, `getLevelMeter()`
@@ -384,12 +387,28 @@ The library exposes common CI‑V operations as friendly methods. Addresses are 
 - `getBreakInMode() => Promise<'off'|'semi'|'full'|null>` / `setBreakInMode(mode)` — Hamlib-aligned BK-IN control using `0x16 0x47`, where raw `1` is semi and raw `2` is full.
 - `getLevel(name: IcomLevelName, options?: QueryOptions) => Promise<number|null>` / `setLevel(name, value)` — Generic level layer for `AF`, `RF`, `SQL`, `IF`, `PBT_IN`, `PBT_OUT`, `CWPITCH`, `KEYSPD`, `NOTCHF_RAW`, `COMP`, `MONITOR_GAIN`, `VOXGAIN`, `ANTIVOX`, and profile ext levels.
 - Common level wrappers: `getRFGain()/setRFGain()`, `getIFShift()/setIFShift()`, `getPbtIn()/setPbtIn()`, `getPbtOut()/setPbtOut()`, `getCwPitch()/setCwPitch()`, `getKeySpeed()/setKeySpeed()`, `getNotchRaw()/setNotchRaw()`, `getCompressionLevel()/setCompressionLevel()`, `getMonitorGain()/setMonitorGain()`, `getVoxGain()/setVoxGain()`, `getAntiVox()/setAntiVox()`.
+- `sendMorse(text, options?)` / `sendCwText(text, options?)` — Send printable ASCII text through the rig's internal CW keyer using CI-V `0x17`; text is uppercased and split into 30-byte chunks by default.
+- `stopMorse(options?)` — Stop the rig CW keyer by sending CI-V `0x17 0xff` and waiting for ACK.
 - `getRitOffset()/setRitOffset()` and `getXitOffset()/setXitOffset()` — RIT/XIT delta register using Hamlib `0x21 0x00`; `getRitEnabled()/setRitEnabled()` and `getXitEnabled()/setXitEnabled()` use `0x21 0x01/0x02`.
 - `getSplitEnabled()/setSplitEnabled()`, `getSplitFrequency()/setSplitFrequency()`, `getSplitMode()/setSplitMode()` — Modern profiles use targetable TX VFO `0x25/0x26` with VFO number `1`.
 - `getVfo()/setVfo()` and `vfoOperation('copy'|'exchange'|'from-vfo'|'to-vfo'|'memory-clear'|'tune')` — Safe Hamlib VFO operation subset.
 - `getTuningStep()/setTuningStep(hz)` — Profile-specific Hamlib tuning step tables.
 - `getToneFrequency()/setToneFrequency(hz)` and `getToneSquelchFrequency()/setToneSquelchFrequency(hz)` — CTCSS values use public Hz, encoded as tenth-Hz BCD BE.
 - `getRepeaterShift()/setRepeaterShift('none'|'minus'|'plus')` and `getRepeaterOffset()/setRepeaterOffset(hz)` — Repeater offset uses public Hz, encoded as 100 Hz units.
+
+#### CW Text Sending
+
+```ts
+await rig.setMode('CW');
+rig.setBreakInMode('semi');
+rig.setKeySpeed(20);
+
+// Sends printable ASCII text to the radio's built-in CW keyer via CI-V 0x17.
+await rig.sendMorse('CQ CQ DE N0CALL', { timeout: 3000 });
+await rig.stopMorse();
+```
+
+`sendMorse()` does not synthesize local Morse audio and does not automatically change mode, PTT, power, or break-in settings. By default it first verifies that the radio reports `CW` or `CW_R`; pass `{ checkMode: false }` only when your application already controls that state. CI-V ACK/NAK replies do not include request IDs, so avoid mixing raw `sendCiv()` write commands that also expect ACKs while a CW text send is in progress.
 
 #### Scope / Spectrum
 

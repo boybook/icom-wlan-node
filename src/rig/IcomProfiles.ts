@@ -46,6 +46,10 @@ export interface IcomProfile {
   vfos: IcomVfoName[];
   repeater: boolean;
   tone: boolean;
+  cw: {
+    sendMorse: boolean;
+    maxChunkLength: number;
+  };
   spectrumAdvanced: Array<'dataOutput' | 'hold' | 'speed' | 'ref' | 'avg' | 'vbw' | 'rbw' | 'duringTx' | 'centerType'>;
   audioIfSources: IcomAudioIfSource[];
   calibrations: {
@@ -195,6 +199,7 @@ const TARGETABLE_VFOS: IcomVfoName[] = ['A', 'B', 'MAIN', 'SUB', 'MAIN_A', 'MAIN
 const COMMON_VFO_OPS: IcomVfoOperation[] = ['copy', 'exchange', 'from-vfo', 'to-vfo', 'memory-clear', 'tune'];
 const IC905_VFO_OPS: IcomVfoOperation[] = ['copy', 'from-vfo', 'to-vfo', 'memory-clear', 'tune'];
 const SPECTRUM_ADVANCED = ['dataOutput', 'hold', 'speed', 'ref', 'avg', 'vbw', 'rbw', 'duringTx', 'centerType'] as IcomProfile['spectrumAdvanced'];
+const CW_TEXT_SUPPORTED = { sendMorse: true, maxChunkLength: 30 };
 
 const TS_IC756PRO = [
   { hz: 10, code: 0x00 },
@@ -265,6 +270,7 @@ function baseProfile(overrides: Partial<IcomProfile> & Pick<IcomProfile, 'modelI
     vfos: DEFAULT_VFOS,
     repeater: false,
     tone: false,
+    cw: { sendMorse: false, maxChunkLength: 30 },
     spectrumAdvanced: ['dataOutput', 'hold', 'speed', 'ref', 'vbw', 'duringTx', 'centerType'],
     audioIfSources: ['default'],
     calibrations: {
@@ -383,6 +389,7 @@ export const ICOM_PROFILES: Record<IcomModelId, IcomProfile> = {
     vfos: DEFAULT_VFOS,
     repeater: true,
     tone: true,
+    cw: CW_TEXT_SUPPORTED,
     spectrumAdvanced: ['dataOutput', 'hold', 'speed', 'ref', 'avg', 'vbw', 'duringTx', 'centerType'],
     audioIfSources: ['default', 'wlan'],
     calibrations: {
@@ -413,6 +420,7 @@ export const ICOM_PROFILES: Record<IcomModelId, IcomProfile> = {
     vfos: DEFAULT_VFOS,
     repeater: true,
     tone: true,
+    cw: CW_TEXT_SUPPORTED,
     spectrumAdvanced: ['dataOutput', 'hold', 'speed', 'ref', 'avg', 'vbw', 'duringTx', 'centerType'],
     audioIfSources: ['default', 'wlan'],
     calibrations: {
@@ -442,6 +450,7 @@ export const ICOM_PROFILES: Record<IcomModelId, IcomProfile> = {
     vfos: DEFAULT_VFOS,
     repeater: false,
     tone: true,
+    cw: CW_TEXT_SUPPORTED,
     spectrumAdvanced: ['dataOutput', 'hold', 'speed', 'ref', 'avg', 'vbw', 'duringTx', 'centerType'],
     audioIfSources: ['default'],
     extParams: {
@@ -468,6 +477,7 @@ export const ICOM_PROFILES: Record<IcomModelId, IcomProfile> = {
     vfos: TARGETABLE_VFOS,
     repeater: true,
     tone: true,
+    cw: CW_TEXT_SUPPORTED,
     spectrumAdvanced: ['dataOutput', 'hold', 'speed', 'ref', 'avg', 'vbw', 'duringTx', 'centerType'],
     audioIfSources: ['default', 'lan', 'acc'],
     extParams: {
@@ -490,6 +500,7 @@ export const ICOM_PROFILES: Record<IcomModelId, IcomProfile> = {
     vfos: TARGETABLE_VFOS,
     repeater: false,
     tone: true,
+    cw: CW_TEXT_SUPPORTED,
     spectrumAdvanced: SPECTRUM_ADVANCED,
     audioIfSources: ['default'],
     extParams: {
@@ -520,6 +531,7 @@ export const ICOM_PROFILES: Record<IcomModelId, IcomProfile> = {
     vfos: DEFAULT_VFOS,
     repeater: false,
     tone: true,
+    cw: CW_TEXT_SUPPORTED,
     spectrumAdvanced: [],
     extParamSpecs: {
       ...IC7760_EXT_SPECS,

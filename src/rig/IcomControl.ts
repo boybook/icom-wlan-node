@@ -2,11 +2,11 @@ import { EventEmitter } from 'events';
 import { CapCapabilitiesPacket, Cmd, ControlPacket, LoginPacket, LoginResponsePacket, RadioCapPacket, Sizes, StatusPacket, TokenPacket, TokenType, ConnInfoPacket, AUDIO_SAMPLE_RATE, XIEGU_TX_BUFFER_SIZE, PingPacket, CivPacket } from '../core/IcomPackets';
 import { dbg, dbgV } from '../utils/debug';
 import { Session } from '../core/Session';
-import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SquelchStatusReading, AudioSquelchReading, OvfStatusReading, PowerLevelReading, CompLevelReading, VoltageReading, CurrentReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics, DisconnectReason, DisconnectOptions, TunerStatusReading, TunerState, LevelReading, IcomScopeSpanInfo, IcomScopeMode, IcomScopeModeInfo, IcomScopeEdgeInfo, IcomScopeFixedEdgeInfo, IcomSpectrumDisplayState, IcomSpectrumDisplayConfig, IcomModelId, IcomFunctionName, IcomLevelName, IcomParameterName, IcomVfoName, IcomVfoOperation, IcomRepeaterShift, IcomSpectrumSpeed, IcomSpectrumCenterType, IcomAudioIfSource } from '../types';
+import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, SendMorseOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SquelchStatusReading, AudioSquelchReading, OvfStatusReading, PowerLevelReading, CompLevelReading, VoltageReading, CurrentReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics, DisconnectReason, DisconnectOptions, TunerStatusReading, TunerState, LevelReading, IcomScopeSpanInfo, IcomScopeMode, IcomScopeModeInfo, IcomScopeEdgeInfo, IcomScopeFixedEdgeInfo, IcomSpectrumDisplayState, IcomSpectrumDisplayConfig, IcomModelId, IcomFunctionName, IcomLevelName, IcomParameterName, IcomVfoName, IcomVfoOperation, IcomRepeaterShift, IcomSpectrumSpeed, IcomSpectrumCenterType, IcomAudioIfSource } from '../types';
 import { IcomCiv } from './IcomCiv';
 import { IcomAudio } from './IcomAudio';
 import { IcomRigCommands } from './IcomRigCommands';
-import { getModeCode, getConnectorModeCode, DEFAULT_CONTROLLER_ADDR, METER_THRESHOLDS, METER_TIMER_PERIOD_MS } from './IcomConstants';
+import { getModeCode, getConnectorModeCode, DEFAULT_CONTROLLER_ADDR, METER_THRESHOLDS, METER_TIMER_PERIOD_MS, MODE_MAP } from './IcomConstants';
 import { parseTwoByteBcd, intToTwoByteBcd } from '../utils/bcd';
 import { ConnectionAbortedError, getDisconnectMessage, UnsupportedCommandError } from '../utils/errors';
 import { rawToSMeter } from '../utils/smeter';
@@ -141,6 +141,8 @@ export class IcomControl {
   private meterTimer?: NodeJS.Timeout;
   private activeProfile: IcomProfile = getProfileByModel('generic-modern-icom');
   private lastFilter: 1 | 2 | 3 = 1;
+  private cwQueue: Promise<void> = Promise.resolve();
+  private cwGeneration = 0;
 
   // Connection state machine (replaces old fragmented state flags)
   private connectionSession: ConnectionSession = {
@@ -1829,6 +1831,65 @@ export class IcomControl {
   setCwPitch(hz: number) { this.setLevel('CWPITCH', hz); }
   async getKeySpeed(options?: QueryOptions) { return this.getLevel('KEYSPD', options); }
   setKeySpeed(wpm: number) { this.setLevel('KEYSPD', wpm); }
+
+  async sendMorse(text: string, options: SendMorseOptions = {}): Promise<void> {
+    const normalized = IcomControl.normalizeMorseText(text);
+    if (normalized.length === 0) return;
+
+    const generation = this.cwGeneration;
+    return this.enqueueCw(async () => {
+      if (generation !== this.cwGeneration) return;
+      if (!this.activeProfile.cw.sendMorse) {
+        throw this.unsupported('SEND_MORSE', 'sendMorse', 'CW text sending is not enabled for active profile');
+      }
+
+      const timeoutMs = options.timeout ?? 3000;
+      if (options.checkMode !== false) {
+        const mode = await this.readOperatingMode({ timeout: timeoutMs });
+        if (!mode || (mode.mode !== MODE_MAP.CW && mode.mode !== MODE_MAP.CW_R)) {
+          throw new Error(`CW 0x17 sendMorse requires CW/CW_R mode; current mode is ${mode?.modeName ?? mode?.mode ?? 'unknown'}`);
+        }
+      }
+
+      const profileMax = Math.max(1, Math.min(30, this.activeProfile.cw.maxChunkLength || 30));
+      const requested = Number.isFinite(options.chunkLength) ? Math.floor(options.chunkLength as number) : profileMax;
+      const chunkLength = Math.max(1, Math.min(30, profileMax, requested));
+      const interChunkDelayMs = Number.isFinite(options.interChunkDelayMs)
+        ? Math.max(0, Math.floor(options.interChunkDelayMs as number))
+        : 0;
+      const bytes = Buffer.from(normalized, 'ascii');
+      const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+      const rigAddr = this.civ.civAddress & 0xff;
+
+      for (let offset = 0, chunkIndex = 1; offset < bytes.length; offset += chunkLength, chunkIndex++) {
+        if (generation !== this.cwGeneration) return;
+        const chunk = bytes.subarray(offset, Math.min(offset + chunkLength, bytes.length));
+        const frame = IcomRigCommands.sendMorseText(ctrAddr, rigAddr, chunk);
+        await this.sendCwFrameAndWaitForAck(frame, timeoutMs, `chunk ${chunkIndex}`);
+        if (generation !== this.cwGeneration) return;
+        if (interChunkDelayMs > 0 && offset + chunkLength < bytes.length) {
+          await new Promise((resolve) => setTimeout(resolve, interChunkDelayMs));
+        }
+      }
+    });
+  }
+
+  sendCwText(text: string, options?: SendMorseOptions): Promise<void> {
+    return this.sendMorse(text, options);
+  }
+
+  async stopMorse(options: { timeout?: number } = {}): Promise<void> {
+    this.cwGeneration += 1;
+    return this.enqueueCw(async () => {
+      if (!this.activeProfile.cw.sendMorse) {
+        throw this.unsupported('SEND_MORSE', 'stopMorse', 'CW text sending is not enabled for active profile');
+      }
+      const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+      const rigAddr = this.civ.civAddress & 0xff;
+      await this.sendCwFrameAndWaitForAck(IcomRigCommands.stopMorse(ctrAddr, rigAddr), options.timeout ?? 3000, 'stop');
+    });
+  }
+
   async getNotchRaw(options?: QueryOptions) { return this.getLevel('NOTCHF_RAW', options); }
   setNotchRaw(value: number) { this.setLevel('NOTCHF_RAW', value); }
   async getCompressionLevel(options?: QueryOptions) { return this.getLevel('COMP', options); }
@@ -2120,6 +2181,29 @@ export class IcomControl {
     });
   }
 
+  private enqueueCw<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.cwQueue.then(operation, operation);
+    this.cwQueue = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private async sendCwFrameAndWaitForAck(frame: Buffer, timeoutMs: number, label: string): Promise<void> {
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const resp = await this.waitForCivFrame(
+      'cw:ack:0x17',
+      (candidate) => IcomControl.matchAckNakFrame(candidate, ctrAddr, rigAddr),
+      timeoutMs,
+      () => this.sendCiv(frame)
+    );
+    if (!resp) {
+      throw new Error(`CW 0x17 ${label} ACK timeout`);
+    }
+    if (resp[4] === CIV.NAK) {
+      throw new Error(`CW 0x17 ${label} NAK received`);
+    }
+  }
+
   private async readFunctionRaw(name: IcomFunctionName, spec: { command: number; subcmd: number; readPrefix?: number[] }, options?: QueryOptions): Promise<number | null> {
     const timeoutMs = options?.timeout ?? 3000;
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
@@ -2355,6 +2439,28 @@ export class IcomControl {
     }
     if (frame[frame.length - 1] !== 0xfd) return false;
     return true;
+  }
+
+  private static matchAckNakFrame(frame: Buffer, ctrAddr: number, rigAddr: number) {
+    if (!(frame.length >= 6 && frame[0] === CIV.PR && frame[1] === CIV.PR)) return false;
+    const addrCtrOk = frame[2] === (ctrAddr & 0xff) || frame[2] === 0x00;
+    if (!addrCtrOk || frame[3] !== (rigAddr & 0xff)) return false;
+    if (frame[4] !== CIV.ACK && frame[4] !== CIV.NAK) return false;
+    return frame[frame.length - 1] === CIV.FI;
+  }
+
+  private static normalizeMorseText(text: string): string {
+    if (typeof text !== 'string') {
+      throw new Error('CW 0x17 sendMorse text must be a string');
+    }
+    const normalized = text.toUpperCase().replace(/[\r\n\t]/g, ' ');
+    for (let i = 0; i < normalized.length; i++) {
+      const code = normalized.charCodeAt(i);
+      if (code < 0x20 || code > 0x7e) {
+        throw new Error(`CW 0x17 sendMorse text contains unsupported non-printable or non-ASCII character at index ${i}`);
+      }
+    }
+    return normalized;
   }
 
   private async waitForCiv(predicate: (frame: Buffer) => boolean, timeoutMs: number, onSend?: () => void): Promise<Buffer | null> {

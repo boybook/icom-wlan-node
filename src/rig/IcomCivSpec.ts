@@ -26,6 +26,7 @@ export const CIV = {
   C_CTL_LVL: 0x14,
   C_RD_SQSM: 0x15,
   C_CTL_FUNC: 0x16,
+  C_SND_CW: 0x17,
   C_SET_TONE: 0x1b,
   C_CTL_MEM: 0x1a,
   C_CTL_PTT: 0x1c,

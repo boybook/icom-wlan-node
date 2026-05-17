@@ -127,6 +127,17 @@ export interface SetModeOptions {
   filter?: 1 | 2 | 3;
 }
 
+export interface SendMorseOptions {
+  /** ACK/NAK timeout per CI-V 0x17 chunk. Defaults to 3000 ms. */
+  timeout?: number;
+  /** Maximum text bytes per CI-V 0x17 chunk. Defaults to the active profile limit. */
+  chunkLength?: number;
+  /** Read and require CW/CW_R mode before sending. Defaults to true. */
+  checkMode?: boolean;
+  /** Optional delay between acknowledged chunks. Defaults to 0 ms. */
+  interChunkDelayMs?: number;
+}
+
 /**
  * Options for query operations (frequency, meters, etc.)
  */

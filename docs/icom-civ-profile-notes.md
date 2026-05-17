@@ -35,6 +35,7 @@ This project transports CI-V frames inside ICOM LAN/WLAN UDP CIV packets. The UD
 | RIT/XIT | `C_CTL_RIT = 0x21` | Offset uses `0x21 0x00` with little-endian BCD plus sign byte; enable flags use `0x21 0x01/0x02` |
 | Generic level layer | `icom_set_level()` / `icom_get_level()` | Adds RF gain, IF shift, PBT in/out, CW pitch, key speed, notch, compressor, monitor gain, VOX gain, anti-VOX and profile ext levels |
 | CW pitch / key speed | `cw_lookup` and `RIG_LEVEL_CWPITCH` logic in `icom.c` | CW pitch is exposed as 300..900 Hz; key speed is exposed as 6..48 WPM |
+| CW text send | `icom_defs.h` `C_SND_CW = 0x17`, `icom_send_morse()`, `icom_stop_morse()` | Sends printable ASCII to the rig keyer in chunks of up to 30 bytes; stop sends payload `0xff` |
 | Split / TX VFO | `icom_set_split_*()` and targetable `0x25/0x26` paths | Modern profiles use VFO number `1` for TX frequency/mode; split enable uses `0x0f 0x00/0x01` |
 | VFO operations | `icom_vfo_op()` | Safe subset: copy, exchange, from VFO, to VFO, memory clear and tune |
 | Tuning step | `ic7300_ts_sc_list`, `ic705_ts_sc_list`, `ic9700_ts_sc_list`, `ic756pro_ts_sc_list` | Step tables are profile data and writes use `0x10 [stepCode]` |
