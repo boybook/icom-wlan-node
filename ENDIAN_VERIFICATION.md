@@ -89,6 +89,7 @@
 |-----|------|---------|--------------|--------|---------|-----|
 | 0x10 | ident | `shortToByte()` 手动 | BE | 手动BE | BE | ✓ |
 | 0x12 | sendSeq | `shortToByte()` 手动 | BE | 手动BE | BE | ✓ |
+| 0x12 | sendSeq (读) | — | BE | `be16.read()` (`AudioPacket.getAudioSeq`) | BE | ✓ |
 | 0x16 | datalen | `shortToByte()` | BE | `be16.write()` | BE | ✓ |
 | 0x16 | datalen (读) | `readShortData()` | BE | `be16.read()` | BE | ✓ |
 

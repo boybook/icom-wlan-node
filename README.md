@@ -220,7 +220,7 @@ await rig.disableScope();
   - `civFrame(Buffer)` — one complete CI‑V frame (FE FE ... FD)
   - `scopeSegment(IcomScopeSegmentInfo)` — one parsed `0x27` scope segment
   - `scopeFrame(IcomScopeFrame)` — one assembled spectrum/waterfall frame
-  - `audio({ pcm16: Buffer })` — audio frames
+  - `audio({ pcm16: Buffer, seq?: number, timestampMs?: number })` — audio frames; `seq` is the wire-level sequence number (16-bit, wraps at 0xffff) for packet-loss detection, `timestampMs` is the RX arrival time (`Date.now()`)
   - `error(Error)` — UDP errors
   - `connectionLost(ConnectionLostInfo)` — session timeout detected
   - `connectionRestored(ConnectionRestoredInfo)` — reconnected successfully

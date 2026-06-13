@@ -34,6 +34,14 @@ describe('IcomPackets', () => {
     expect(AudioPacket.getAudioData(ap).length).toBe(480);
   });
 
+  test('audio packet sequence number round-trips (big-endian @ 0x12)', () => {
+    const audio = Buffer.alloc(480, 0);
+    const ap = AudioPacket.getTxAudioPacket(audio, 0, 1, 2, 0xabcd);
+    expect(ap[0x12]).toBe(0xab); // high byte first (big-endian)
+    expect(ap[0x13]).toBe(0xcd);
+    expect(AudioPacket.getAudioSeq(ap)).toBe(0xabcd);
+  });
+
   test('conninfo packet build', () => {
     const mac = Buffer.from([1,2,3,4,5,6]);
     const p = ConnInfoPacket.connectRequestPacket(0, 1, 2, 0x01, 0x03, 0x30, 0x1234, 0xabcdef01,

@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import { CapCapabilitiesPacket, Cmd, ControlPacket, LoginPacket, LoginResponsePacket, RadioCapPacket, Sizes, StatusPacket, TokenPacket, TokenType, ConnInfoPacket, AUDIO_SAMPLE_RATE, XIEGU_TX_BUFFER_SIZE, PingPacket, CivPacket } from '../core/IcomPackets';
+import { CapCapabilitiesPacket, Cmd, ControlPacket, LoginPacket, LoginResponsePacket, RadioCapPacket, Sizes, StatusPacket, TokenPacket, TokenType, ConnInfoPacket, AUDIO_SAMPLE_RATE, XIEGU_TX_BUFFER_SIZE, PingPacket, CivPacket, AudioPacket } from '../core/IcomPackets';
 import { dbg, dbgV } from '../utils/debug';
 import { Session } from '../core/Session';
 import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, SendMorseOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SquelchStatusReading, AudioSquelchReading, OvfStatusReading, PowerLevelReading, CompLevelReading, VoltageReading, CurrentReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics, DisconnectReason, DisconnectOptions, TunerStatusReading, TunerState, LevelReading, IcomScopeSpanInfo, IcomScopeMode, IcomScopeModeInfo, IcomScopeEdgeInfo, IcomScopeFixedEdgeInfo, IcomSpectrumDisplayState, IcomSpectrumDisplayConfig, IcomModelId, IcomFunctionName, IcomLevelName, IcomParameterName, IcomVfoName, IcomVfoOperation, IcomRepeaterShift, IcomSpectrumSpeed, IcomSpectrumCenterType, IcomAudioIfSource } from '../types';
@@ -2924,7 +2924,9 @@ export class IcomControl {
       const dataLen = buf.readUInt16BE(0x16);
       if (buf.length === 0x18 + dataLen && dataLen > 0 && dataLen <= 2048) {
         const audio = Buffer.from(buf.subarray(0x18, 0x18 + dataLen));
-        this.ev.emit('audio', { pcm16: audio });
+        // Surface the wire-level sequence number (0x12 BE) and RX arrival time so
+        // consumers can detect packet loss/reordering at the application layer.
+        this.ev.emit('audio', { pcm16: audio, seq: AudioPacket.getAudioSeq(buf), timestampMs: Date.now() });
         return;
       }
     }

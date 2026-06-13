@@ -321,6 +321,8 @@ export const AudioPacket = {
     return b.length - Sizes.AUDIO_HEAD === be16.read(b, 0x16);
   },
   getAudioData(b: Buffer): Buffer { return Buffer.from(b.subarray(0x18)); },
+  // sendSeq is big-endian at 0x12 (symmetric with getTxAudioPacket's manual write)
+  getAudioSeq(b: Buffer): number { return be16.read(b, 0x12); },
   getTxAudioPacket(audio: Buffer, seq: number, sentId: number, rcvdId: number, sendSeq: number): Buffer {
     const b = Buffer.alloc(Sizes.AUDIO_HEAD + audio.length);
     le32.write(b, 0, b.length);

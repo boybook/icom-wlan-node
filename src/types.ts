@@ -48,6 +48,17 @@ export interface CivCommand {
 export interface AudioFrame {
   // LPCM 16bit mono 12kHz
   pcm16: Buffer;
+  /**
+   * Wire-level audio sequence number (16-bit, big-endian at packet offset 0x12).
+   * Increments by 1 per audio packet and wraps at 0xffff. Consumers can use it to
+   * detect packet loss/reordering. Undefined for control packets / older builds.
+   */
+  seq?: number;
+  /**
+   * Receiver arrival time in ms (`Date.now()` when the frame was parsed).
+   * Uncalibrated system clock — intended for diagnostics, not as a sync reference.
+   */
+  timestampMs?: number;
 }
 
 export interface LoginResult {
