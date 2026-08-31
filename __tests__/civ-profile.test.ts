@@ -1,6 +1,7 @@
 import { IcomControl } from '../src/rig/IcomControl';
 import { IcomRigCommands } from '../src/rig/IcomRigCommands';
 import { DEFAULT_CONTROLLER_ADDR, MODE_MAP } from '../src/rig/IcomConstants';
+import { resolveIcomProfile } from '../src/rig/IcomProfiles';
 import { CIV } from '../src/rig/IcomCivSpec';
 import { buildCivFrame, encodeFrequencyBcdLE } from '../src/rig/IcomCivFrame';
 import { Session } from '../src/core/Session';
@@ -141,6 +142,52 @@ describe('Hamlib-aligned CI-V profile behavior', () => {
 
     const generic = makeRig('generic-modern-icom');
     await expect(generic.setConnectorWLanLevel(120)).rejects.toThrow('Unsupported ICOM CI-V command');
+  });
+
+  test('uses CI-V Transceiver ID 0x19/0x00 as authoritative model identity', async () => {
+    const rig = makeRig('generic-modern-icom');
+    const sent: Buffer[] = [];
+    (rig as any).sendCiv = (buf: Buffer) => {
+      sent.push(Buffer.from(buf));
+      setTimeout(() => rig.events.emit('civFrame', Buffer.from([
+        0xfe, 0xfe, DEFAULT_CONTROLLER_ADDR, 0xa4,
+        0x19, 0x00, 0xa4, 0xfd,
+      ])), 0);
+    };
+
+    const identity = await rig.getRadioIdentity({ timeout: 1000 });
+
+    expect(sent[0]).toEqual(Buffer.from([
+      0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x19, 0x00, 0xfd,
+    ]));
+    expect(identity).toMatchObject({
+      modelId: 'IC-705',
+      authority: 'civ-transceiver-id',
+      verified: true,
+      transceiverId: 0xa4,
+    });
+  });
+
+  test('reads connector data mode from the model-specific extension', async () => {
+    const rig = makeRig('IC-705');
+    const sent: Buffer[] = [];
+    (rig as any).sendCiv = (buf: Buffer) => {
+      sent.push(Buffer.from(buf));
+      setTimeout(() => rig.events.emit('civFrame', Buffer.from([
+        0xfe, 0xfe, DEFAULT_CONTROLLER_ADDR, 0xa4,
+        0x1a, 0x05, 0x01, 0x19, 0x02, 0xfd,
+      ])), 0);
+    };
+
+    await expect(rig.getConnectorDataMode({ timeout: 1000 })).resolves.toBe('USB');
+    expect(sent[0]).toEqual(Buffer.from([
+      0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR,
+      0x1a, 0x05, 0x01, 0x19, 0xfd,
+    ]));
+  });
+
+  test('does not let generic profile shadow IC-705 address matching', () => {
+    expect(resolveIcomProfile({ requestedModel: 'auto', civAddress: 0xa4 }).modelId).toBe('IC-705');
   });
 
   test('readPtt powers readTransceiverState through 0x1c/0x00', async () => {

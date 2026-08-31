@@ -68,7 +68,7 @@ export interface IcomProfile {
   extParamSpecs: IcomExtParamTable;
   vendorExtensions: {
     connectorWlanLevel?: IcomExtParam;
-    connectorDataMode?: { command: number; subcmd: number; subext: number[] };
+    connectorDataMode?: IcomExtParam;
   };
 }
 
@@ -362,7 +362,7 @@ const IC7760_EXT_SPECS: IcomExtParamTable = {
 
 const ic705Vendor = {
   connectorWlanLevel: { command: 0x1a, subcmd: 0x05, subext: [0x01, 0x17], dataBytes: 2, dataType: 'level' as const },
-  connectorDataMode: { command: 0x1a, subcmd: 0x05, subext: [0x01, 0x19] },
+  connectorDataMode: { command: 0x1a, subcmd: 0x05, subext: [0x01, 0x19], dataBytes: 1, dataType: 'int' as const },
 };
 
 export const ICOM_PROFILES: Record<IcomModelId, IcomProfile> = {
@@ -576,7 +576,12 @@ export function resolveIcomProfile(options: { requestedModel?: IcomModelId | 'au
   }
 
   if (options.civAddress !== undefined) {
-    const byAddress = Object.values(ICOM_PROFILES).find((profile) => profile.defaultCivAddress === (options.civAddress! & 0xff));
+    // The generic profile intentionally uses the common 0xA4 default address
+    // as a safe baseline. It must never win an address match over a concrete
+    // model profile (IC-705 also uses 0xA4).
+    const byAddress = Object.values(ICOM_PROFILES)
+      .filter((profile) => profile.modelId !== 'generic-modern-icom')
+      .find((profile) => profile.defaultCivAddress === (options.civAddress! & 0xff));
     if (byAddress) return byAddress;
   }
 

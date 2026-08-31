@@ -30,6 +30,8 @@ export const CIV = {
   C_SET_TONE: 0x1b,
   C_CTL_MEM: 0x1a,
   C_CTL_PTT: 0x1c,
+  /** Read transceiver/model ID (subcommand 0x00). */
+  C_RD_ID: 0x19,
   C_CTL_RIT: 0x21,
   C_SEND_SEL_FREQ: 0x25,
   C_SEND_SEL_MODE: 0x26,

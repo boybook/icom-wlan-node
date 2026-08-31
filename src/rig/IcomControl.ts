@@ -2,11 +2,11 @@ import { EventEmitter } from 'events';
 import { CapCapabilitiesPacket, Cmd, ControlPacket, LoginPacket, LoginResponsePacket, RadioCapPacket, Sizes, StatusPacket, TokenPacket, TokenType, ConnInfoPacket, AUDIO_SAMPLE_RATE, XIEGU_TX_BUFFER_SIZE, PingPacket, CivPacket, AudioPacket } from '../core/IcomPackets';
 import { dbg, dbgV } from '../utils/debug';
 import { Session } from '../core/Session';
-import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, SendMorseOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SquelchStatusReading, AudioSquelchReading, OvfStatusReading, PowerLevelReading, CompLevelReading, VoltageReading, CurrentReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics, DisconnectReason, DisconnectOptions, TunerStatusReading, TunerState, LevelReading, IcomScopeSpanInfo, IcomScopeMode, IcomScopeModeInfo, IcomScopeEdgeInfo, IcomScopeFixedEdgeInfo, IcomSpectrumDisplayState, IcomSpectrumDisplayConfig, IcomModelId, IcomFunctionName, IcomLevelName, IcomParameterName, IcomVfoName, IcomVfoOperation, IcomRepeaterShift, IcomSpectrumSpeed, IcomSpectrumCenterType, IcomAudioIfSource } from '../types';
+import { IcomRigEvents, IcomRigOptions, LoginResult, StatusInfo, CapabilitiesInfo, RigEventEmitter, IcomMode, ConnectorDataMode, SetModeOptions, SendMorseOptions, QueryOptions, SwrReading, AlcReading, WlanLevelReading, LevelMeterReading, SquelchStatusReading, AudioSquelchReading, OvfStatusReading, PowerLevelReading, CompLevelReading, VoltageReading, CurrentReading, SessionType, ConnectionState, ConnectionLostInfo, ConnectionRestoredInfo, ConnectionMonitorConfig, ReconnectAttemptInfo, ReconnectFailedInfo, ConnectionPhase, ConnectionSession, ConnectionMetrics, DisconnectReason, DisconnectOptions, TunerStatusReading, TunerState, LevelReading, IcomScopeSpanInfo, IcomScopeMode, IcomScopeModeInfo, IcomScopeEdgeInfo, IcomScopeFixedEdgeInfo, IcomSpectrumDisplayState, IcomSpectrumDisplayConfig, IcomModelId, IcomFunctionName, IcomLevelName, IcomParameterName, IcomVfoName, IcomVfoOperation, IcomRepeaterShift, IcomSpectrumSpeed, IcomSpectrumCenterType, IcomAudioIfSource, IcomRadioIdentity } from '../types';
 import { IcomCiv } from './IcomCiv';
 import { IcomAudio } from './IcomAudio';
 import { IcomRigCommands } from './IcomRigCommands';
-import { getModeCode, getConnectorModeCode, DEFAULT_CONTROLLER_ADDR, METER_THRESHOLDS, METER_TIMER_PERIOD_MS, MODE_MAP } from './IcomConstants';
+import { getModeCode, getConnectorModeCode, getConnectorModeString, DEFAULT_CONTROLLER_ADDR, METER_THRESHOLDS, METER_TIMER_PERIOD_MS, MODE_MAP } from './IcomConstants';
 import { parseTwoByteBcd, intToTwoByteBcd } from '../utils/bcd';
 import { ConnectionAbortedError, getDisconnectMessage, UnsupportedCommandError } from '../utils/errors';
 import { rawToSMeter } from '../utils/smeter';
@@ -15,7 +15,7 @@ import { parseIcomBcdFreqLE } from '../scope/IcomScopeParser';
 import { IcomScopeService } from '../scope/IcomScopeService';
 import { decodeBcdBE, decodeFrequencyBcdLE, encodeBcdBE, encodeFrequencyBcdLE } from './IcomCivFrame';
 import { CIV } from './IcomCivSpec';
-import { IcomExtParam, IcomProfile, getProfileByModel, interpolateCalibration, resolveIcomProfile } from './IcomProfiles';
+import { IcomExtParam, IcomProfile, ICOM_PROFILES, getProfileByModel, interpolateCalibration, resolveIcomProfile } from './IcomProfiles';
 import { IcomCivRequestManager } from './IcomCivRequestManager';
 
 const DEFAULT_SCOPE_SPANS_HZ = [25000000, 10000000, 5000000, 2500000, 1000000, 500000, 250000, 100000, 50000, 25000, 10000, 5000, 2500] as const;
@@ -134,6 +134,7 @@ export class IcomControl {
   public scope: IcomScopeService;
   private options: IcomRigOptions;
   private rigName = '';
+  private audioName = '';
   private macAddress: Buffer = Buffer.alloc(6);
   private tokenTimer?: NodeJS.Timeout;
   private civAssembleBuf: Buffer = Buffer.alloc(0); // CIV stream reassembler
@@ -209,6 +210,49 @@ export class IcomControl {
   get events(): RigEventEmitter { return this.ev; }
 
   get profile(): IcomProfile { return this.activeProfile; }
+
+  /** Query the radio's model ID using CI-V 0x19/0x00. */
+  async getRadioIdentity(options?: QueryOptions): Promise<IcomRadioIdentity> {
+    const timeoutMs = options?.timeout ?? 3000;
+    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
+    const rigAddr = this.civ.civAddress & 0xff;
+    const resp = await this.waitForCivFrame(
+      'identity:0x19:0x00',
+      (frame) => IcomControl.matchCommandFrame(frame, CIV.C_RD_ID, [0x00], ctrAddr, rigAddr),
+      timeoutMs,
+      () => this.sendCiv(IcomRigCommands.readTransceiverId(ctrAddr, rigAddr)),
+    );
+
+    if (resp && resp.length >= 7) {
+      const transceiverId = resp[6] & 0xff;
+      const matched = Object.values(ICOM_PROFILES).find((profile) => (
+        profile.modelId !== 'generic-modern-icom' && profile.defaultCivAddress === transceiverId
+      ));
+      if (matched) {
+        this.activeProfile = matched;
+        return {
+          modelId: matched.modelId,
+          profileName: matched.profileName,
+          authority: 'civ-transceiver-id',
+          verified: true,
+          transceiverId,
+          civAddress: rigAddr,
+          rigName: this.rigName || undefined,
+          audioName: this.audioName || undefined,
+        };
+      }
+    }
+
+    return {
+      modelId: this.activeProfile.modelId === 'generic-modern-icom' ? null : this.activeProfile.modelId,
+      profileName: this.activeProfile.modelId === 'generic-modern-icom' ? null : this.activeProfile.profileName,
+      authority: 'unknown',
+      verified: false,
+      civAddress: rigAddr,
+      rigName: this.rigName || undefined,
+      audioName: this.audioName || undefined,
+    };
+  }
 
   private resolveActiveProfile(context: { rigName?: string; civAddress?: number } = {}) {
     const next = resolveIcomProfile({
@@ -1337,6 +1381,16 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     const modeCode = typeof mode === 'string' ? getConnectorModeCode(mode) : mode;
     this.sendCiv(IcomRigCommands.setConnectorDataMode(ctrAddr, rigAddr, modeCode, ext.subext));
+  }
+
+  /** Read the current connector data routing mode (0x1a/0x05 extension). */
+  async getConnectorDataMode(options?: QueryOptions): Promise<ConnectorDataMode | null> {
+    const ext = this.activeProfile.vendorExtensions.connectorDataMode;
+    if (!ext) {
+      throw new UnsupportedCommandError({ modelId: this.getProfileModelId(), commandName: 'getConnectorDataMode', civCommand: '0x1a/0x05', reason: 'No vendor connector data-mode extension for active profile' });
+    }
+    const raw = await this.readExtParamValue(ext, 'connector-data-mode', options);
+    return raw === null ? null : (getConnectorModeString(raw) as ConnectorDataMode | undefined) ?? null;
   }
 
   /**
@@ -2632,6 +2686,7 @@ export class IcomControl {
             audioName: RadioCapPacket.getAudioName(cap),
             supportTX: RadioCapPacket.getSupportTX(cap)
           };
+          this.audioName = info.audioName ?? '';
           if (info.civAddress != null) {
             this.civ.civAddress = info.civAddress;
             this.resolveActiveProfile({ civAddress: info.civAddress });

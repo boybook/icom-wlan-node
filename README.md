@@ -233,7 +233,7 @@ await rig.disableScope();
   - **Scope / Spectrum**: `scope`, `enableScope()`, `disableScope()`, `waitForScopeFrame()`
   - **Audio TX**: `setPtt(on: boolean)`, `sendAudioFloat32()`, `sendAudioPcm16()`
   - **Rig Control**: `setFrequency()`, `setMode()`, `setConnectorDataMode()`, `setConnectorWLanLevel()`
-  - **Rig Query**: `readOperatingFrequency()`, `readOperatingMode()`, `readTransmitFrequency()`, `readPtt()`, `readTransceiverState()`, `readBandEdges()`
+- **Rig Query**: `readOperatingFrequency()`, `readOperatingMode()`, `readTransmitFrequency()`, `readPtt()`, `readTransceiverState()`, `readBandEdges()`, `getRadioIdentity()`
   - **Antenna Tuner**: `readTunerStatus()`, `setTunerEnabled()`, `startManualTune()`
   - **Functions**: `getFunction()`, `setFunction()`, plus wrappers for NB/NR/COMP/VOX/MON/ANF/MN/LOCK/BK-IN
   - **Levels**: `getLevel()`, `setLevel()`, plus wrappers for RF gain, IF shift, PBT, CW pitch, key speed, monitor gain, VOX gain
@@ -489,6 +489,11 @@ Current implementation notes:
 #### Connector Settings
 
 - `setConnectorDataMode(mode: ConnectorDataMode | number)` — Private connector routing extension; supported only on profiles that declare the vendor command
+- `getConnectorDataMode(options?: QueryOptions) => Promise<ConnectorDataMode | null>` — Reads the current connector route from the radio; returns `null` on timeout and throws `UnsupportedCommandError` when the active profile has no route extension
+
+#### Radio Identity
+
+- `getRadioIdentity(options?: QueryOptions) => Promise<IcomRadioIdentity>` — Queries CI-V `0x19/0x00` and marks a known response as `verified` with authority `civ-transceiver-id`. WLAN rig name/address profile matches are retained as hints only and are never treated as verified identity.
 
 **Supported Connector Modes** (ConnectorDataMode string constants):
 - `'MIC'` (0x00), `'ACC'` (0x01), `'USB'` (0x02), `'WLAN'` (0x03)

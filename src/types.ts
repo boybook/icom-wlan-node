@@ -82,6 +82,27 @@ export interface CapabilitiesInfo {
   profileName?: string;
 }
 
+/** Identity evidence resolved from the radio's CI-V/WLAN handshake. */
+export type IcomIdentityAuthority =
+  | 'civ-transceiver-id'
+  | 'wlan-rig-name'
+  | 'wlan-cap-address'
+  | 'configured'
+  | 'unknown';
+
+export interface IcomRadioIdentity {
+  modelId: IcomModelId | null;
+  profileName: string | null;
+  authority: IcomIdentityAuthority;
+  /** True only when the radio answered CI-V 0x19/0x00 with a known ID. */
+  verified: boolean;
+  transceiverId?: number;
+  civAddress?: number;
+  rigName?: string;
+  audioName?: string;
+  mismatch?: boolean;
+}
+
 export interface IcomRigEvents {
   login: (res: LoginResult) => void;
   status: (s: StatusInfo) => void;

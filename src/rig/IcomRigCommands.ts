@@ -57,6 +57,10 @@ export const IcomRigCommands = {
     return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_CTL_MEM, subcmd: [0x00, 0x48] });
   },
 
+  readTransceiverId(ctrAddr: number, rigAddr: number): Buffer {
+    return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_RD_ID, subcmd: 0x00 });
+  },
+
   readBandEdges(ctrAddr: number, rigAddr: number): Buffer {
     return buildCivFrame({ rigAddr, ctrlAddr: ctrAddr, cmd: CIV.C_RD_BAND });
   },
