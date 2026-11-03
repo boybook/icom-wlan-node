@@ -20,7 +20,7 @@ import { IcomScopeService } from '../scope/IcomScopeService';
 import { buildCivFrame, decodeBcdBE, decodeFrequencyBcdLE, encodeBcdBE, encodeFrequencyBcdLE } from './IcomCivFrame';
 import { CIV } from './IcomCivSpec';
 import { IcomExtParam, IcomProfile, ICOM_PROFILES, getProfileByModel, interpolateCalibration, resolveIcomProfile } from './IcomProfiles';
-import { IcomCivRequestManager } from './IcomCivRequestManager';
+import { CivCommandRejectedError, IcomCivRequestManager } from './IcomCivRequestManager';
 
 const DEFAULT_SCOPE_SPANS_HZ = [25000000, 10000000, 5000000, 2500000, 1000000, 500000, 250000, 100000, 50000, 25000, 10000, 5000, 2500] as const;
 
@@ -2099,19 +2099,16 @@ export class IcomControl {
   }
 
   private async sendCwFrameAndWaitForAck(frame: Buffer, timeoutMs: number, label: string): Promise<void> {
-    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
-    const rigAddr = this.civ.civAddress & 0xff;
-    const resp = await this.waitForCivFrame(
-      'cw:ack:0x17',
-      (candidate) => IcomControl.matchAckNakFrame(candidate, ctrAddr, rigAddr),
-      timeoutMs,
-      () => this.sendCiv(frame)
-    );
-    if (!resp) {
-      throw new Error(`CW 0x17 ${label} ACK timeout`);
-    }
-    if (resp[4] === CIV.NAK) {
-      throw new Error(`CW 0x17 ${label} NAK received`);
+    try {
+      await this.writeCiv(frame, timeoutMs);
+    } catch (error) {
+      if (error instanceof CivCommandRejectedError) {
+        throw new CivCommandRejectedError(`CW 0x17 ${label} NAK received`);
+      }
+      if (error instanceof Error && error.message === 'ICOM write acknowledgement timeout') {
+        throw new Error(`CW 0x17 ${label} ACK timeout`);
+      }
+      throw error;
     }
   }
 
@@ -2767,7 +2764,7 @@ export class IcomControl {
     return this.civRequestManager.query({
       key,
       predicate,
-      rejectPredicate: frame => !key.startsWith('cw:ack:') && IcomControl.matchAckNakFrame(frame, DEFAULT_CONTROLLER_ADDR, this.civ.civAddress & 0xff) && frame[4] === 0xfa,
+      rejectPredicate: frame => IcomControl.matchAckNakFrame(frame, DEFAULT_CONTROLLER_ADDR, this.civ.civAddress & 0xff) && frame[4] === 0xfa,
       timeoutMs,
       abortQueueOnTimeout,
       send: () => { if (onSend) onSend(); },

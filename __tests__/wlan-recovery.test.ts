@@ -224,6 +224,20 @@ describe('Icom UDP recovery with production protocol owners', () => {
     const close = radio.disconnect(); await advance(400); await close;
   });
 
+  test('retires the reply stream after a CW acknowledgement timeout before sending another write', async () => {
+    const radio = rig(); const connected = radio.connect(); await advance(); await connected;
+    peer.dropCivReplies = true;
+    const before = peer.writes.filter(b => CivPacket.isCiv(b)).length;
+    const cw = radio.sendMorse('E', { checkMode: false, timeout: 30 }).catch(e => e);
+    await advance(1);
+    const next = radio.setPtt(true).catch(e => e);
+    await advance(3400);
+    expect((await cw).message).toContain('CW 0x17 chunk 1 ACK timeout');
+    expect(await next).toBeInstanceOf(Error);
+    expect(peer.writes.filter(b => CivPacket.isCiv(b)).length - before).toBe(1);
+    expect(peer.open.size).toBe(0);
+  });
+
   test('model matching is exact and the two connector tables remain independent', () => {
     expect(resolveIcomProfile({ rigName: 'IC-7300MK2', civAddress: 0xb6 }).modelId).toBe('IC-7300MK2');
     expect(resolveIcomProfile({ rigName: 'IC-7300-UNKNOWN' }).modelId).toBe('generic-modern-icom');

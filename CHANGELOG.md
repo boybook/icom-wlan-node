@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.1 — 2026-11-03
+
+- Route CW text/stop acknowledgements through the same transaction owner as
+  other device writes. A CW ACK timeout now cancels queued commands and retires
+  the uncertain stream before another write can receive a stale acknowledgement.
+- Preserve CW chunk context while exposing device NAK as a structured rejection.
+- Add a UDP-peer regression for CW timeout followed by a queued PTT write.
+
 ## 0.8.0 — 2026-11-03
 
 - Add an independent IC-7300MK2 profile with B6 identity and documented USB,
