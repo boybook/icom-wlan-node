@@ -8,7 +8,7 @@ export interface IcomCredentials {
   password: string;
 }
 
-export type IcomModelId = 'IC-705' | 'IC-905' | 'IC-7300' | 'IC-9700' | 'IC-7610' | 'IC-7760' | 'generic-modern-icom';
+export type IcomModelId = 'IC-705' | 'IC-905' | 'IC-7300' | 'IC-7300MK2' | 'IC-9700' | 'IC-7610' | 'IC-7760' | 'generic-modern-icom';
 
 export type IcomFunctionName =
   | 'NB' | 'NR' | 'COMP' | 'VOX' | 'TONE' | 'TSQL' | 'SBKIN' | 'FBKIN'
@@ -39,6 +39,15 @@ export interface IcomRigOptions extends IcomCredentials {
   control: UdpAddress; // Icom control service (UDP) address
   /** Radio model profile. Defaults to auto-detection from rig name or CI-V address. */
   model?: IcomModelId | 'auto';
+  /** Total handshake deadline, including socket binding. Default 15000 ms. */
+  connectTimeoutMs?: number;
+  /** Optional application logger. Receives bounded protocol lifecycle events, never credentials. */
+  logger?: (message: string, details?: Record<string, unknown>) => void;
+}
+
+export interface IcomConnectOptions {
+  timeout?: number;
+  signal?: AbortSignal;
 }
 
 export interface CivCommand {
@@ -144,7 +153,7 @@ export type IcomMode = keyof typeof MODE_MAP;
  * Connector data routing mode
  * MIC: Microphone, ACC: Accessory port, USB: USB audio, WLAN: Network audio
  */
-export type ConnectorDataMode = keyof typeof CONNECTOR_MODE_MAP;
+export type ConnectorDataMode = keyof typeof CONNECTOR_MODE_MAP | 'MIC_USB' | 'MIC_ACC';
 
 /**
  * Options for setting operating mode

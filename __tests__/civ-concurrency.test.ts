@@ -33,7 +33,7 @@ describe('CI-V query concurrency', () => {
 
   beforeEach(() => {
     openSpy = jest.spyOn(Session.prototype, 'open').mockImplementation(function mockOpen(this: Session) {
-      return this;
+      return Promise.resolve();
     });
   });
 
@@ -63,7 +63,7 @@ describe('CI-V query concurrency', () => {
     expect(sent).toHaveLength(1);
   });
 
-  test('allows different response keys to run concurrently', async () => {
+  test('queues different response keys so untagged NAKs have a unique owner', async () => {
     const rig = makeRig();
     const sent: Buffer[] = [];
     (rig as any).sendCiv = (buf: Buffer) => {

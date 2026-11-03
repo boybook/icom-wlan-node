@@ -66,6 +66,8 @@ export interface IcomProfile {
     afIfWlan?: IcomExtParam;
   };
   extParamSpecs: IcomExtParamTable;
+  /** Per-model DATA MOD encodings; network means WLAN or LAN as appropriate. */
+  connectorModes?: Partial<Record<string, number>>;
   vendorExtensions: {
     connectorWlanLevel?: IcomExtParam;
     connectorDataMode?: IcomExtParam;
@@ -290,7 +292,7 @@ function baseProfile(overrides: Partial<IcomProfile> & Pick<IcomProfile, 'modelI
 }
 
 const ic705Ext = {
-  usbAfLevel: { command: 0x1a, subcmd: 0x05, subext: [0x01, 0x13], dataBytes: 2, dataType: 'level' as const },
+  usbAfLevel: { command: 0x1a, subcmd: 0x05, subext: [0x01, 0x10], dataBytes: 2, dataType: 'level' as const },
   afIfWlan: { command: 0x1a, subcmd: 0x05, subext: [0x01, 0x14], dataBytes: 1, dataType: 'bool' as const },
 };
 
@@ -403,6 +405,7 @@ export const ICOM_PROFILES: Record<IcomModelId, IcomProfile> = {
     },
     extParams: ic705Ext,
     extParamSpecs: IC705_EXT_SPECS,
+    connectorModes: { MIC: 0, USB: 1, MIC_USB: 2, WLAN: 3 },
     vendorExtensions: ic705Vendor,
   }),
   'IC-905': baseProfile({
@@ -434,7 +437,40 @@ export const ICOM_PROFILES: Record<IcomModelId, IcomProfile> = {
     },
     extParams: ic705Ext,
     extParamSpecs: IC705_EXT_SPECS,
+    connectorModes: { MIC: 0, USB: 1, MIC_USB: 2, WLAN: 3 },
     vendorExtensions: ic705Vendor,
+  }),
+  // IC-7300MK2 CI-V Reference Guide, connector table and scope settings.
+  // This is not the IC-7300 table: most 1A/05 addresses changed.
+  'IC-7300MK2': baseProfile({
+    modelId: 'IC-7300MK2', profileName: 'Icom IC-7300MK2',
+    defaultCivAddress: 0xb6, aliases: ['IC-7300MK2', 'IC7300MK2', 'IC-7300MKII'],
+    functions: [...COMMON_FUNCTIONS, 'APF', 'IPP', 'TX_INHIBIT'],
+    levels: [...COMMON_LEVELS, 'APF', 'SPECTRUM_AVG'],
+    parameters: [...COMMON_PARAMETERS, 'AFIF_LAN', 'AFIF_ACC'],
+    tuningSteps: TS_IC7300, tone: true, cw: CW_TEXT_SUPPORTED,
+    spectrumAdvanced: ['dataOutput', 'hold', 'speed', 'ref', 'avg', 'vbw', 'duringTx', 'centerType'],
+    audioIfSources: ['default', 'lan', 'acc'],
+    extParams: { usbAfLevel: ext([0x00, 0x70], 2, 'level') },
+    extParamSpecs: {
+      BEEP: ext([0x00, 0x24], 1, 'bool'),
+      BACKLIGHT: ext([0x01, 0x15], 2, 'level'),
+      SCREENSAVER: ext([0x01, 0x23], 1, 'int'),
+      TIME: ext([0x01, 0x33], 2, 'time'),
+      AFIF: ext([0x00, 0x69], 1, 'bool'),
+      AFIF_ACC: ext([0x00, 0x74], 1, 'bool'),
+      AFIF_LAN: ext([0x00, 0x79], 1, 'bool'),
+      VOXDELAY: ext([0x02, 0x67], 1, 'int'),
+      TRANSCEIVE: ext([0x00, 0x89], 1, 'bool'),
+      SPECTRUM_AVG: ext([0x01, 0x42], 1, 'int'),
+      AGC_TIME: { command: 0x1a, subcmd: 0x04, subext: [], dataBytes: 1, dataType: 'int' },
+      KEYERTYPE: ext([0x02, 0x24], 1, 'int'),
+    },
+    connectorModes: { MIC: 0, USB: 1, ACC: 2, MIC_USB: 3, MIC_ACC: 4, WLAN: 5 },
+    vendorExtensions: {
+      connectorWlanLevel: ext([0x00, 0x83], 2, 'level'),
+      connectorDataMode: ext([0x00, 0x85], 1, 'int'),
+    },
   }),
   'IC-7300': baseProfile({
     modelId: 'IC-7300',
@@ -567,10 +603,11 @@ export function resolveIcomProfile(options: { requestedModel?: IcomModelId | 'au
     return getProfileByModel(options.requestedModel);
   }
 
-  const normalizedName = options.rigName?.replace(/\s+/g, '').toUpperCase();
+  const normalize = (name: string) => name.replace(/[\s-]+/g, '').toUpperCase();
+  const normalizedName = options.rigName ? normalize(options.rigName) : undefined;
   if (normalizedName) {
     const byName = Object.values(ICOM_PROFILES).find((profile) =>
-      profile.aliases.some((alias) => normalizedName.includes(alias.replace(/\s+/g, '').toUpperCase()))
+      profile.aliases.some((alias) => normalizedName === normalize(alias))
     );
     if (byName) return byName;
   }

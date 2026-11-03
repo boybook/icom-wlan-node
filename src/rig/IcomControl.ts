@@ -1,4 +1,8 @@
 import { EventEmitter } from 'events';
+import { lookup } from 'dns/promises';
+import { isIP } from 'net';
+import { be16, le16, le32 } from '../utils/codec';
+import { IcomConnectOptions } from '../types';
 import { CapCapabilitiesPacket, Cmd, ControlPacket, LoginPacket, LoginResponsePacket, RadioCapPacket, Sizes, StatusPacket, TokenPacket, TokenType, ConnInfoPacket, AUDIO_SAMPLE_RATE, XIEGU_TX_BUFFER_SIZE, PingPacket, CivPacket, AudioPacket } from '../core/IcomPackets';
 import { dbg, dbgV } from '../utils/debug';
 import { Session } from '../core/Session';
@@ -13,7 +17,7 @@ import { rawToSMeter } from '../utils/smeter';
 import { IcomScopeCommands } from '../scope/IcomScopeCommands';
 import { parseIcomBcdFreqLE } from '../scope/IcomScopeParser';
 import { IcomScopeService } from '../scope/IcomScopeService';
-import { decodeBcdBE, decodeFrequencyBcdLE, encodeBcdBE, encodeFrequencyBcdLE } from './IcomCivFrame';
+import { buildCivFrame, decodeBcdBE, decodeFrequencyBcdLE, encodeBcdBE, encodeFrequencyBcdLE } from './IcomCivFrame';
 import { CIV } from './IcomCivSpec';
 import { IcomExtParam, IcomProfile, ICOM_PROFILES, getProfileByModel, interpolateCalibration, resolveIcomProfile } from './IcomProfiles';
 import { IcomCivRequestManager } from './IcomCivRequestManager';
@@ -139,7 +143,6 @@ export class IcomControl {
   private tokenTimer?: NodeJS.Timeout;
   private civAssembleBuf: Buffer = Buffer.alloc(0); // CIV stream reassembler
   private civRequestManager: IcomCivRequestManager;
-  private meterTimer?: NodeJS.Timeout;
   private activeProfile: IcomProfile = getProfileByModel('generic-modern-icom');
   private lastFilter: 1 | 2 | 3 = 1;
   private cwQueue: Promise<void> = Promise.resolve();
@@ -152,6 +155,16 @@ export class IcomControl {
     startTime: Date.now()
   };
   private nextSessionId = 1;
+  private connectPromise?: Promise<void>;
+  private cleanupPromise?: Promise<void>;
+  private reconnectAbort?: AbortController;
+  private handshakeStage = 'idle';
+  private authenticated = false;
+  private streamRequested = false;
+  private streamsStarted = false;
+  private tokenRenewedAt = 0;
+  private identityVerified = false;
+
   // Map of sessionId -> abort function for cancelling ongoing connection attempts
   private abortHandlers = new Map<number, (reason: DisconnectReason, silent: boolean) => void>();
 
@@ -179,25 +192,23 @@ export class IcomControl {
     // Setup control session
     this.sess = new Session({ ip: options.control.ip, port: options.control.port }, {
       onData: (data) => this.onData(data),
-      onSendError: (e) => this.ev.emit('error', e)
+      onSendError: (e) => this.handleTransportError(e)
     });
     this.sess.sessionType = SessionType.CONTROL;
 
     // Setup CIV session
     this.civSess = new Session({ ip: options.control.ip, port: 0 }, {
       onData: (b) => this.onCivData(b),
-      onSendError: (e) => this.ev.emit('error', e)
+      onSendError: (e) => this.handleTransportError(e)
     });
     this.civSess.sessionType = SessionType.CIV;
-    this.civSess.open();
 
     // Setup audio session
     this.audioSess = new Session({ ip: options.control.ip, port: 0 }, {
       onData: (b) => this.onAudioData(b),
-      onSendError: (e) => this.ev.emit('error', e)
+      onSendError: (e) => this.handleTransportError(e)
     });
     this.audioSess.sessionType = SessionType.AUDIO;
-    this.audioSess.open();
 
     this.civ = new IcomCiv(this.civSess);
     this.audio = new IcomAudio(this.audioSess);
@@ -223,13 +234,14 @@ export class IcomControl {
       () => this.sendCiv(IcomRigCommands.readTransceiverId(ctrAddr, rigAddr)),
     );
 
-    if (resp && resp.length >= 7) {
+    if (resp && resp.length >= 8) {
       const transceiverId = resp[6] & 0xff;
       const matched = Object.values(ICOM_PROFILES).find((profile) => (
         profile.modelId !== 'generic-modern-icom' && profile.defaultCivAddress === transceiverId
       ));
       if (matched) {
         this.activeProfile = matched;
+        this.identityVerified = true;
         return {
           modelId: matched.modelId,
           profileName: matched.profileName,
@@ -241,6 +253,11 @@ export class IcomControl {
           audioName: this.audioName || undefined,
         };
       }
+      // An authoritative unknown ID overrides a misleading name/address hint.
+      this.activeProfile = getProfileByModel('generic-modern-icom');
+      this.identityVerified = true;
+      return { modelId: null, profileName: null, authority: 'civ-transceiver-id', verified: false,
+        transceiverId, civAddress: rigAddr, rigName: this.rigName || undefined, audioName: this.audioName || undefined };
     }
 
     return {
@@ -255,6 +272,7 @@ export class IcomControl {
   }
 
   private resolveActiveProfile(context: { rigName?: string; civAddress?: number } = {}) {
+    if (this.identityVerified) return;
     const next = resolveIcomProfile({
       requestedModel: this.options.model,
       rigName: context.rigName ?? this.rigName,
@@ -343,240 +361,106 @@ export class IcomControl {
   /**
    * Connect to the rig
    * Idempotent: multiple calls during CONNECTING phase are safe
-   * @throws Error if called during DISCONNECTING phase
+   * Waits for any previous teardown before opening a new generation.
    */
-  async connect() {
-    const currentPhase = this.connectionSession.phase;
-
-    // If already connected, return immediately
-    if (currentPhase === ConnectionPhase.CONNECTED) {
-      dbg('connect() called but already CONNECTED - returning immediately');
-      return;
-    }
-
-    // If already connecting or reconnecting, wait for completion (idempotent)
-    if (currentPhase === ConnectionPhase.CONNECTING || currentPhase === ConnectionPhase.RECONNECTING) {
-      dbg(`connect() called while ${currentPhase} - idempotent behavior, will wait`);
-      // Return a promise that resolves when state changes to CONNECTED
-      return new Promise<void>((resolve, reject) => {
-        const checkState = () => {
-          if (this.connectionSession.phase === ConnectionPhase.CONNECTED) {
-            resolve();
-          } else if (this.connectionSession.phase === ConnectionPhase.IDLE) {
-            reject(new Error('Connection failed'));
-          } else {
-            setTimeout(checkState, 100);
-          }
-        };
-        checkState();
-      });
-    }
-
-    // Reject if in DISCONNECTING phase
-    if (currentPhase === ConnectionPhase.DISCONNECTING) {
-      throw new Error('Cannot connect while disconnecting - wait for IDLE state');
-    }
-
-    // Only IDLE state can transition to CONNECTING
-    if (!this.canTransitionTo(ConnectionPhase.CONNECTING)) {
-      throw new Error(`Cannot connect from ${currentPhase} state`);
-    }
-
-    // Start new connection session
+  async connect(options: IcomConnectOptions = {}): Promise<void> {
+    if (this.cleanupPromise) await this.cleanupPromise;
+    if (this.connectionSession.phase === ConnectionPhase.CONNECTED) return;
+    if (this.connectPromise) return this.connectPromise;
+    const timeout = options.timeout ?? this.options.connectTimeoutMs ?? 15000;
+    if (!Number.isFinite(timeout) || timeout <= 0) throw new Error('Invalid connection timeout');
     const sessionId = this.nextSessionId++;
     this.connectionSession.sessionId = sessionId;
-    this.transitionTo(ConnectionPhase.CONNECTING, `User connect() - sessionId=${sessionId}`);
-
-    try {
-      await this._doConnect(sessionId);
+    this.transitionTo(ConnectionPhase.CONNECTING, 'Starting handshake');
+    const operation = this._doConnect(sessionId, timeout, options.signal).then(() => {
+      if (this.connectionSession.sessionId !== sessionId || this.connectionSession.phase !== ConnectionPhase.CONNECTING) {
+        throw new ConnectionAbortedError(DisconnectReason.CLEANUP, sessionId, this.connectionSession.phase);
+      }
       this.transitionTo(ConnectionPhase.CONNECTED, 'All sessions ready');
-      dbg(`Connection session ${sessionId} established successfully`);
-    } catch (err) {
-      // Clean up abort handler
-      this.abortHandlers.delete(sessionId);
-      // Transition to IDLE on failure
-      this.transitionTo(ConnectionPhase.IDLE, `Connection failed: ${err instanceof Error ? err.message : String(err)}`);
-      throw err;
-    }
-  }
-
-  /**
-   * Internal connection implementation
-   * Uses local promises to avoid race conditions
-   * Uses phased timeout: 30s for overall, 10s for sub-sessions after login
-   * @param sessionId - Unique session ID to prevent race conditions
-   */
-  private async _doConnect(sessionId: number) {
-    const { loginReady, civReady, audioReady, cleanup } = this.createReadyPromises(sessionId);
-
-    try {
-      // Reset all session states to initial values
-      // This is CRITICAL for reconnection after radio restart
-      // Without this, the radio won't recognize our old localId/remoteId/tokens
-      dbg('Resetting all session states before connection...');
-      this.sess.resetState();
-      this.civSess.resetState();
-      this.audioSess.resetState();
-
-      // Ensure all session sockets are open (critical for reconnection after disconnect)
-      this.sess.open();
-      this.civSess.open();
-      this.audioSess.open();
-
-      this.sess.startAreYouThere();
-
-      // Phase 1: Wait for login (protected by overall 30s timeout from connectWithTimeout)
-      await loginReady;
-      dbg('Login complete, waiting for CIV/Audio sub-sessions...');
-
-      // Phase 2: Wait for CIV/Audio with shorter timeout (10s)
-      // If radio doesn't respond to AreYouThere, fail fast instead of waiting full 30s
-      const SUB_SESSION_TIMEOUT = 10000;
-      const subSessionTimeout = new Promise<void>((_, reject) => {
-        setTimeout(() => {
-          reject(new Error(`CIV/Audio sessions timeout after ${SUB_SESSION_TIMEOUT}ms - radio not responding to AreYouThere`));
-        }, SUB_SESSION_TIMEOUT);
-      });
-
-      await Promise.race([
-        Promise.all([civReady, audioReady]),
-        subSessionTimeout
-      ]);
-
-      dbg('All sessions ready (login + civ + audio)');
-
-      // Start unified connection monitoring
       this.startUnifiedMonitoring();
-      dbg('Unified connection monitoring started');
-    } finally {
-      cleanup();
-    }
+      this.options.logger?.('ICOM handshake completed', { sessionId });
+    }).catch(async error => {
+      const failedId = this.connectionSession.sessionId === sessionId ? this.nextSessionId++ : undefined;
+      if (failedId !== undefined) {
+        this.connectionSession.sessionId = failedId;
+        this.transitionTo(ConnectionPhase.DISCONNECTING, 'Handshake failed');
+      }
+      await this.releaseResources();
+      if (this.connectionSession.sessionId === failedId) this.transitionTo(ConnectionPhase.IDLE, 'Handshake failed');
+      this.options.logger?.('ICOM handshake failed', { sessionId, stage: this.handshakeStage, error: String(error) });
+      throw error;
+    });
+    this.connectPromise = operation;
+    try { await operation; }
+    finally { if (this.connectPromise === operation) this.connectPromise = undefined; }
   }
 
-  /**
-   * Create local promises for connection readiness
-   * This avoids race conditions with instance variables
-   * @param sessionId - Connection session ID for abort handler tracking
-   */
-  private createReadyPromises(sessionId: number) {
-    let resolveLogin: () => void;
-    let resolveCiv: () => void;
-    let resolveAudio: () => void;
-    let rejectLogin: (reason: Error) => void;
-    let rejectCiv: (reason: Error) => void;
-    let rejectAudio: (reason: Error) => void;
-
-    const loginReady = new Promise<void>((resolve, reject) => {
-      resolveLogin = resolve;
-      rejectLogin = reject;
+  private async _doConnect(sessionId: number, timeout: number, signal?: AbortSignal): Promise<void> {
+    this.handshakeStage = 'socket-bind';
+    this.authenticated = false;
+    this.streamRequested = false;
+    this.streamsStarted = false;
+    this.identityVerified = false;
+    this.rigName = '';
+    this.audioName = '';
+    this.civAssembleBuf = Buffer.alloc(0);
+    this.civ.reset();
+    this.activeProfile = getProfileByModel(this.options.model);
+    this.civ.civAddress = this.activeProfile.defaultCivAddress;
+    let cancel!: () => void;
+    const ready = new Promise<void>((resolve, reject) => {
+      let login = false, civ = false, audio = false;
+      const finish = () => { if (login && civ && audio) resolve(); };
+      const onLogin = (result: LoginResult) => {
+        if (!result.ok) { reject(new Error(`ICOM login rejected: ${result.errorCode}`)); return; }
+        login = true;
+        this.handshakeStage = 'civ-audio-ready';
+        finish();
+      };
+      const onCiv = () => { civ = true; finish(); };
+      const onAudio = () => { audio = true; finish(); };
+      const timer = setTimeout(() => reject(new Error(
+        `ICOM handshake timeout at ${this.handshakeStage} after ${timeout}ms (login=${login}, civ=${civ}, audio=${audio})`)), timeout);
+      const abort = () => reject(new ConnectionAbortedError(DisconnectReason.USER_REQUEST, sessionId, this.connectionSession.phase));
+      this.abortHandlers.set(sessionId, (reason) => reject(new ConnectionAbortedError(reason, sessionId, this.connectionSession.phase)));
+      this.ev.on('login', onLogin);
+      this.ev.on('_civReady', onCiv);
+      this.ev.on('_audioReady', onAudio);
+      signal?.addEventListener('abort', abort, { once: true });
+      cancel = () => {
+        clearTimeout(timer);
+        this.abortHandlers.delete(sessionId);
+        this.ev.off('login', onLogin);
+        this.ev.off('_civReady', onCiv);
+        this.ev.off('_audioReady', onAudio);
+        signal?.removeEventListener('abort', abort);
+      };
+      if (signal?.aborted) abort();
     });
-    const civReady = new Promise<void>((resolve, reject) => {
-      resolveCiv = resolve;
-      rejectCiv = reject;
-    });
-    const audioReady = new Promise<void>((resolve, reject) => {
-      resolveAudio = resolve;
-      rejectAudio = reject;
-    });
-
-    // Store abort handler bound to this specific sessionId
-    // This prevents race conditions when multiple connection attempts overlap
-    const abortHandler = (reason: DisconnectReason, silent: boolean) => {
-      const message = getDisconnectMessage(reason);
-      dbg(`Aborting connection session ${sessionId}: ${message} (silent=${silent})`);
-
-      // Create a single error instance to be shared across all rejections
-      const error = new ConnectionAbortedError(
-        reason,
-        sessionId,
-        this.connectionSession.phase
-      );
-
-      // IMPORTANT: Always reject promises to unblock waiting code
-      // The "silent" flag only affects whether errors propagate to user code,
-      // but internally we must settle the promise to prevent hanging
-      dbg(`${silent ? 'Silent' : 'Normal'} abort - rejecting login promise for session ${sessionId}`);
-
-      // Defensive error handling: wrap reject calls in try-catch to prevent
-      // synchronous errors from propagating if promises are already settled
-      // Only reject one promise to avoid duplicate errors
-      try {
-        rejectLogin(error);
-      } catch (err) {
-        dbg(`Warning: Failed to reject loginReady promise: ${err}`);
-      }
-
-      // Don't reject civ and audio promises separately - they'll be cleaned up
-      // This prevents the "3x User disconnect()" log spam
+    // The same ready promise covers binding and all later handshake stages.
+    const start = async () => {
+      const ip = isIP(this.options.control.ip) ? this.options.control.ip : (await lookup(this.options.control.ip, { family: 4 })).address;
+      if (signal?.aborted || this.connectionSession.sessionId !== sessionId || this.connectionSession.phase !== ConnectionPhase.CONNECTING) return;
+      for (const session of [this.sess, this.civSess, this.audioSess]) session.resetState();
+      this.sess.setRemote(ip, this.options.control.port);
+      this.civSess.setRemote(ip, 0);
+      this.audioSess.setRemote(ip, 0);
+      await Promise.all([this.sess.open(), this.civSess.open(), this.audioSess.open()]);
+      if (this.connectionSession.sessionId !== sessionId || this.connectionSession.phase !== ConnectionPhase.CONNECTING) return;
+      this.handshakeStage = 'control-discovery';
+      this.sess.startAreYouThere();
+      await ready;
     };
-    this.abortHandlers.set(sessionId, abortHandler);
+    try { await Promise.race([start(), ready]); }
+    finally { cancel(); }
+  }
 
-    // Track promise states for defensive cleanup
-    let loginResolved = false;
-    let civResolved = false;
-    let audioResolved = false;
-
-    // Temporary event listeners (local scope)
-    const onLogin = (res: LoginResult) => {
-      if (res.ok) {
-        dbg(`Login ready - resolving local loginReady promise (sessionId=${sessionId})`);
-        loginResolved = true;
-        resolveLogin();
-      }
-    };
-    const onCivReady = () => {
-      dbg(`CIV ready - resolving local civReady promise (sessionId=${sessionId})`);
-      civResolved = true;
-      resolveCiv();
-    };
-    const onAudioReady = () => {
-      dbg(`Audio ready - resolving local audioReady promise (sessionId=${sessionId})`);
-      audioResolved = true;
-      resolveAudio();
-    };
-
-    this.ev.once('login', onLogin);
-    this.ev.once('_civReady', onCivReady);
-    this.ev.once('_audioReady', onAudioReady);
-
-    return {
-      loginReady,
-      civReady,
-      audioReady,
-      cleanup: () => {
-        // Defensive cleanup: wrap each cleanup step in try-catch
-        // to ensure all cleanup steps execute even if one fails
-        dbg(`Cleaning up connection session ${sessionId} (login=${loginResolved}, civ=${civResolved}, audio=${audioResolved})`);
-
-        // Remove abort handler for this specific sessionId
-        try {
-          this.abortHandlers.delete(sessionId);
-        } catch (err) {
-          dbg(`Warning: Failed to delete abort handler: ${err}`);
-        }
-
-        // Remove event listeners - wrap each in try-catch
-        try {
-          this.ev.off('login', onLogin);
-        } catch (err) {
-          dbg(`Warning: Failed to remove login listener: ${err}`);
-        }
-
-        try {
-          this.ev.off('_civReady', onCivReady);
-        } catch (err) {
-          dbg(`Warning: Failed to remove civReady listener: ${err}`);
-        }
-
-        try {
-          this.ev.off('_audioReady', onAudioReady);
-        } catch (err) {
-          dbg(`Warning: Failed to remove audioReady listener: ${err}`);
-        }
-
-        dbg(`Cleanup complete for session ${sessionId}`);
-      }
-    };
+  private handleTransportError(error: Error) {
+    this.abortConnectionAttempt(this.connectionSession.sessionId, DisconnectReason.ERROR);
+    if (this.connectionSession.phase === ConnectionPhase.CONNECTED) this.handleConnectionLost(SessionType.CONTROL, 0);
+    // Errors during teardown must not become uncaught EventEmitter errors.
+    if (this.ev.listenerCount('error')) this.ev.emit('error', error);
+    this.options.logger?.('ICOM transport error', { error: error.message });
   }
 
   /**
@@ -594,6 +478,10 @@ export class IcomControl {
       }
 
       const now = Date.now();
+      if (this.authenticated && now - this.tokenRenewedAt > 75000) {
+        this.handleConnectionLost(SessionType.CONTROL, now - this.tokenRenewedAt);
+        return;
+      }
       const sessions = [
         { sess: this.sess, type: SessionType.CONTROL },
         { sess: this.civSess, type: SessionType.CIV },
@@ -631,122 +519,90 @@ export class IcomControl {
    * @returns Promise that resolves when disconnect is complete
    */
   async disconnect(options?: DisconnectOptions | DisconnectReason): Promise<void> {
-    // Support both object and enum parameter for backward compatibility
-    const opts = typeof options === 'string'
-      ? { reason: options, silent: false }
-      : { reason: DisconnectReason.USER_REQUEST, silent: false, ...options };
+    const reason = typeof options === 'string' ? options : options?.reason ?? DisconnectReason.USER_REQUEST;
+    this.reconnectAbort?.abort();
+    this.abortConnectionAttempt(this.connectionSession.sessionId, reason);
+    this.connectionSession.sessionId = this.nextSessionId++;
+    this.transitionTo(ConnectionPhase.DISCONNECTING, getDisconnectMessage(reason));
+    await this.releaseResources();
+    // All concurrent disconnect callers share the same release operation.
+    this.transitionTo(ConnectionPhase.IDLE, 'Disconnect complete');
+  }
 
-    const reason: DisconnectReason = opts.reason ?? DisconnectReason.USER_REQUEST;
-    const silent = opts.silent ?? false;
-    const currentPhase = this.connectionSession.phase;
-
-    dbg(`disconnect() called with reason=${reason}, silent=${silent}, currentPhase=${currentPhase}`);
-
-    // If already disconnecting or idle, avoid duplicate work
-    if (currentPhase === ConnectionPhase.DISCONNECTING) {
-      dbg('disconnect() called but already DISCONNECTING - waiting for completion');
-      // Wait for transition to IDLE
-      return new Promise<void>((resolve) => {
-        const checkState = () => {
-          if (this.connectionSession.phase === ConnectionPhase.IDLE) {
-            resolve();
-          } else {
-            setTimeout(checkState, 100);
-          }
-        };
-        checkState();
-      });
+  private releaseResources(): Promise<void> {
+    if (this.cleanupPromise) return this.cleanupPromise;
+    this.stopUnifiedMonitoring();
+    if (this.tokenTimer) clearInterval(this.tokenTimer);
+    this.tokenTimer = undefined;
+    this.civ.stop();
+    this.audio.stop();
+    for (const session of [this.sess, this.civSess, this.audioSess]) {
+      session.stopAreYouThere(); session.stopPing(); session.stopIdle();
     }
-
-    if (currentPhase === ConnectionPhase.IDLE) {
-      dbg('disconnect() called but already IDLE - no-op');
-      return;
-    }
-
-    // Abort any ongoing connection attempts - wrap in try-catch for defensive programming
-    const currentSessionId = this.connectionSession.sessionId;
-    if (currentPhase === ConnectionPhase.CONNECTING || currentPhase === ConnectionPhase.RECONNECTING) {
+    this.cwGeneration++;
+    this.civRequestManager.cancelPending(new Error('ICOM session ended'));
+    this.civAssembleBuf = Buffer.alloc(0);
+    this.scope.reset();
+    const operation = (async () => {
       try {
-        dbg(`Aborting ongoing connection attempt (sessionId=${currentSessionId})`);
-        this.abortConnectionAttempt(currentSessionId, reason, silent);
-      } catch (abortErr) {
-        // Log but continue - abort failure shouldn't prevent disconnect
-        const errMsg = abortErr instanceof Error ? abortErr.message : String(abortErr);
-        dbg(`Warning: Failed to abort connection attempt: ${errMsg} - continuing with disconnect`);
-      }
-    }
-
-    // Transition to DISCONNECTING state
-    const transitionReason = getDisconnectMessage(reason);
-    this.transitionTo(ConnectionPhase.DISCONNECTING, transitionReason);
-
-    try {
-      // 1. Stop all timers first to prevent interference
-      this.stopUnifiedMonitoring(); // Stop unified monitoring
-      if (this.tokenTimer) { clearInterval(this.tokenTimer); this.tokenTimer = undefined; }
-      this.stopMeterPolling();
-      this.sess.stopTimers();
-      if (this.civSess) this.civSess.stopTimers();
-      if (this.audioSess) this.audioSess.stopTimers();
-
-      // 2. Send DELETE token packet
-      try {
-        const del = TokenPacket.build(0, this.sess.localId, this.sess.remoteId, TokenType.DELETE, this.sess.innerSeq, this.sess.localToken, this.sess.rigToken);
-        this.sess.innerSeq = (this.sess.innerSeq + 1) & 0xffff;
-        this.sess.sendTracked(del);
-      } catch (err) {
-        dbg('Failed to send DELETE token packet:', err);
-        // Continue with disconnect even if this fails
-      }
-
-      // 3. Send CMD_DISCONNECT to all sessions
-      try {
-        this.sess.sendUntracked(ControlPacket.toBytes(Cmd.DISCONNECT, 0, this.sess.localId, this.sess.remoteId));
-        if (this.civSess) {
-          this.civ.sendOpenClose(false);
-          this.civSess.sendUntracked(ControlPacket.toBytes(Cmd.DISCONNECT, 0, this.civSess.localId, this.civSess.remoteId));
+        if (this.sess.localPort && this.sess.rigToken) {
+          this.sess.sendTracked(TokenPacket.build(0, this.sess.localId, this.sess.remoteId,
+            TokenType.DELETE, this.sess.innerSeq++, this.sess.localToken, this.sess.rigToken));
+          // Keep servicing retransmits while the peer releases its session slot.
+          await this.sleep(300);
         }
-        if (this.audioSess) {
-          this.audioSess.sendUntracked(ControlPacket.toBytes(Cmd.DISCONNECT, 0, this.audioSess.localId, this.audioSess.remoteId));
+        if (this.civSess.localPort && this.civSess.remoteId) this.civ.sendOpenClose(false);
+        for (const session of [this.sess, this.civSess, this.audioSess]) {
+          if (session.localPort && session.remoteId) session.sendUntracked(ControlPacket.toBytes(Cmd.DISCONNECT, 0, session.localId, session.remoteId));
         }
-      } catch (err) {
-        dbg('Failed to send DISCONNECT packets:', err);
-        // Continue with disconnect even if this fails
+        if (this.sess.localPort) await this.sleep(20);
+      } finally {
+        for (const session of [this.sess, this.civSess, this.audioSess]) session.close();
+        this.authenticated = false;
+        this.streamRequested = false;
+        this.streamsStarted = false;
+        this.sess.rigToken = 0;
+        this.options.logger?.('ICOM session resources released');
       }
-
-      // 4. Wait 200ms to ensure UDP packets are sent before closing sockets
-      await new Promise(resolve => setTimeout(resolve, 200));
-
-      // 5. Stop streams and close sockets
-      this.civ.stop();
-      this.audio.stop(); // Stop continuous audio transmission
-      this.sess.close();
-      if (this.civSess) this.civSess.close();
-      if (this.audioSess) this.audioSess.close();
-
-    } catch (err) {
-      dbg('Error during disconnect:', err);
-      // Continue to IDLE state even if there were errors
-    } finally {
-      // Always transition to IDLE at the end
-      this.transitionTo(ConnectionPhase.IDLE, 'Disconnect complete');
-    }
+    })();
+    this.cleanupPromise = operation;
+    void operation.finally(() => { if (this.cleanupPromise === operation) this.cleanupPromise = undefined; }).catch(() => {});
+    return operation;
   }
 
   sendCiv(data: Buffer) { this.civ.sendCivData(data); }
 
+  private async writeCiv(frame: Buffer, timeout = 3000): Promise<void> {
+    const response = await this.waitForCivFrame(`write:${frame.toString('hex')}`,
+      candidate => IcomControl.matchAckNakFrame(candidate, DEFAULT_CONTROLLER_ADDR, this.civ.civAddress & 0xff),
+      timeout, () => this.sendCiv(frame), true);
+    if (!response) {
+      // An uncorrelated late ACK must never acknowledge the next write.
+      this.civRequestManager.cancelPending(new Error('ICOM write acknowledgement timeout'));
+      if (this.connectionSession.phase === ConnectionPhase.CONNECTED) this.handleConnectionLost(SessionType.CIV, timeout);
+      throw new Error('ICOM write acknowledgement timeout');
+    }
+  }
+
+  async setPowerState(state: 'on' | 'off'): Promise<void> {
+    if (state !== 'on' && state !== 'off') throw new Error('Unsupported ICOM power state');
+    await this.writeCiv(buildCivFrame({ rigAddr: this.civ.civAddress, ctrlAddr: DEFAULT_CONTROLLER_ADDR,
+      cmd: 0x18, subcmd: state === 'on' ? 0x01 : 0x00 }));
+  }
+
+
   async enableScope(): Promise<void> {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    this.sendCiv(IcomScopeCommands.setScopeDisplay(ctrAddr, rigAddr, true));
-    this.sendCiv(IcomScopeCommands.setScopeDataOutput(ctrAddr, rigAddr, true));
+    await this.writeCiv(IcomScopeCommands.setScopeDisplay(ctrAddr, rigAddr, true));
+    await this.writeCiv(IcomScopeCommands.setScopeDataOutput(ctrAddr, rigAddr, true));
   }
 
   async disableScope(): Promise<void> {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    this.sendCiv(IcomScopeCommands.setScopeDataOutput(ctrAddr, rigAddr, false));
-    this.sendCiv(IcomScopeCommands.setScopeDisplay(ctrAddr, rigAddr, false));
+    await this.writeCiv(IcomScopeCommands.setScopeDataOutput(ctrAddr, rigAddr, false));
+    await this.writeCiv(IcomScopeCommands.setScopeDisplay(ctrAddr, rigAddr, false));
   }
 
   async readScopeSpan(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<IcomScopeSpanInfo | null> {
@@ -777,7 +633,7 @@ export class IcomControl {
     const receiver = options?.receiver ?? 0;
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    this.sendCiv(IcomScopeCommands.setScopeSpan(ctrAddr, rigAddr, spanHz, receiver));
+    await this.writeCiv(IcomScopeCommands.setScopeSpan(ctrAddr, rigAddr, spanHz, receiver));
   }
 
   async readScopeMode(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<IcomScopeModeInfo | null> {
@@ -810,7 +666,7 @@ export class IcomControl {
     const modeCode = typeof mode === 'string' ? modeNameToCode(mode) : mode;
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    this.sendCiv(IcomScopeCommands.setScopeMode(ctrAddr, rigAddr, modeCode, receiver));
+    await this.writeCiv(IcomScopeCommands.setScopeMode(ctrAddr, rigAddr, modeCode, receiver));
   }
 
   async readScopeEdge(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<IcomScopeEdgeInfo | null> {
@@ -843,7 +699,7 @@ export class IcomControl {
     const safeEdgeSlot = Math.max(1, Math.min(maxSlot, Math.trunc(edgeSlot)));
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    this.sendCiv(IcomScopeCommands.setScopeEdge(ctrAddr, rigAddr, safeEdgeSlot, receiver));
+    await this.writeCiv(IcomScopeCommands.setScopeEdge(ctrAddr, rigAddr, safeEdgeSlot, receiver));
   }
 
   async readScopeFixedEdge(rangeId: number, edgeSlot: number, options?: QueryOptions): Promise<IcomScopeFixedEdgeInfo | null> {
@@ -878,7 +734,7 @@ export class IcomControl {
     const edgeSlot = edgeInfo?.edgeSlot ?? 1;
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    this.sendCiv(IcomScopeCommands.setScopeFixedEdge(ctrAddr, rigAddr, rangeId, edgeSlot, options.lowHz, options.highHz));
+    await this.writeCiv(IcomScopeCommands.setScopeFixedEdge(ctrAddr, rigAddr, rangeId, edgeSlot, options.lowHz, options.highHz));
     return {
       rangeId,
       edgeSlot,
@@ -905,18 +761,20 @@ export class IcomControl {
 
   async getSpectrumDisplayState(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<IcomSpectrumDisplayState> {
     const receiver = options?.receiver ?? 0;
-    const [modeInfo, spanInfo, edgeInfo] = await Promise.all([
-      this.readScopeMode({ ...options, receiver }),
-      this.readScopeSpan({ ...options, receiver }),
-      this.readScopeEdge({ ...options, receiver }),
-    ]);
+    const deadline = performance.now() + (options?.timeout ?? 3000);
+    const read = async <T>(query: (budget: QueryOptions & { receiver: 0 | 1 }) => Promise<T>): Promise<T | null> => {
+      const remaining = Math.ceil(deadline - performance.now());
+      return remaining > 0 ? query({ ...options, receiver, timeout: remaining }) : null;
+    };
+    const modeInfo = await read(budget => this.readScopeMode(budget));
+    const spanInfo = await read(budget => this.readScopeSpan(budget));
+    const edgeInfo = await read(budget => this.readScopeEdge(budget));
     let fixedEdgeInfo: IcomScopeFixedEdgeInfo | null = null;
     if (modeInfo?.modeName === 'fixed' || modeInfo?.modeName === 'scroll-fixed') {
-      try {
-        const rangeId = await this.resolveScopeFrequencyRangeId();
-        fixedEdgeInfo = await this.readScopeFixedEdge(rangeId, edgeInfo?.edgeSlot ?? 1, options);
-      } catch (_) {
-        fixedEdgeInfo = null;
+      const frequency = await read(budget => this.readOperatingFrequency(budget));
+      if (frequency) {
+        const range = this.activeProfile.scopeRanges.find(item => frequency >= item.lowHz && frequency < item.highHz);
+        if (range) fixedEdgeInfo = await read(budget => this.readScopeFixedEdge(range.rangeId, edgeInfo?.edgeSlot ?? 1, budget));
       }
     }
 
@@ -992,7 +850,7 @@ export class IcomControl {
   }
 
   async setSpectrumFixedEdges(options: { rangeId?: number; edgeSlot?: number; lowHz: number; highHz: number }): Promise<{ lowHz: number; highHz: number; rangeId: number; edgeSlot: number }> {
-    return this.setScopeFixedEdge(options);
+    return await this.setScopeFixedEdge(options);
   }
 
   async waitForScopeFrame(options?: QueryOptions) {
@@ -1009,15 +867,9 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     // Send CIV PTT command
     const frame = IcomRigCommands.setPTT(ctrAddr, rigAddr, on);
-    this.sendCiv(frame);
+    await this.writeCiv(frame);
     // Set audio PTT flag (like Java: audioUdp.isPttOn = on)
     this.audio.isPttOn = on;
-    // Start/stop meter polling to match Java behavior
-    if (on) {
-      this.startMeterPolling();
-    } else {
-      this.stopMeterPolling();
-    }
     // Add trailing silence when PTT off (like Java implementation)
     if (!on) {
       // Add 5 trailing silence frames before clearing queue
@@ -1039,7 +891,7 @@ export class IcomControl {
     const frame = this.activeProfile.supportsX25X26
       ? IcomRigCommands.setSelectedFrequency(ctrAddr, rigAddr, hz, bcdBytes, 0)
       : IcomRigCommands.setFrequency(ctrAddr, rigAddr, hz, bcdBytes);
-    this.sendCiv(frame);
+    await this.writeCiv(frame);
   }
 
   /**
@@ -1059,14 +911,14 @@ export class IcomControl {
     const filter = options?.filter ?? this.lastFilter ?? this.activeProfile.defaultFilter;
 
     if (this.activeProfile.supportsX25X26 && this.activeProfile.modeWithFilter) {
-      this.sendCiv(IcomRigCommands.setSelectedMode(ctrAddr, rigAddr, modeCode, !!options?.dataMode, filter, 0));
+      await this.writeCiv(IcomRigCommands.setSelectedMode(ctrAddr, rigAddr, modeCode, !!options?.dataMode, filter, 0));
       return;
     }
 
     if (options?.dataMode && this.activeProfile.dataModeSupported) {
-      this.sendCiv(IcomRigCommands.setOperationDataMode(ctrAddr, rigAddr, modeCode, filter));
+      await this.writeCiv(IcomRigCommands.setOperationDataMode(ctrAddr, rigAddr, modeCode, filter));
     } else {
-      this.sendCiv(IcomRigCommands.setMode(ctrAddr, rigAddr, modeCode, filter));
+      await this.writeCiv(IcomRigCommands.setMode(ctrAddr, rigAddr, modeCode, filter));
     }
   }
 
@@ -1333,7 +1185,7 @@ export class IcomControl {
     }
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    this.sendCiv(IcomRigCommands.setConnectorWLanLevel(ctrAddr, rigAddr, level, ext.subext));
+    await this.writeCiv(IcomRigCommands.setConnectorWLanLevel(ctrAddr, rigAddr, level, ext.subext));
   }
 
   async getUsbAfLevel(options?: QueryOptions): Promise<WlanLevelReading | null> {
@@ -1362,7 +1214,7 @@ export class IcomControl {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
     const raw = Math.max(0, Math.min(255, Math.round(level)));
-    this.sendCiv(IcomRigCommands.setUsbAfLevel(ctrAddr, rigAddr, raw, ext.subext));
+    await this.writeCiv(IcomRigCommands.setUsbAfLevel(ctrAddr, rigAddr, raw, ext.subext));
   }
 
   /**
@@ -1379,8 +1231,10 @@ export class IcomControl {
     }
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    const modeCode = typeof mode === 'string' ? getConnectorModeCode(mode) : mode;
-    this.sendCiv(IcomRigCommands.setConnectorDataMode(ctrAddr, rigAddr, modeCode, ext.subext));
+    const modeCode = typeof mode === 'string'
+      ? (this.activeProfile.connectorModes ? this.activeProfile.connectorModes[mode] : getConnectorModeCode(mode as keyof typeof import('./IcomConstants').CONNECTOR_MODE_MAP)) : mode;
+    if (modeCode === undefined) throw new UnsupportedCommandError({ commandName: 'setConnectorDataMode', reason: 'Unsupported connector for this model' });
+    await this.writeCiv(IcomRigCommands.setConnectorDataMode(ctrAddr, rigAddr, modeCode, ext.subext));
   }
 
   /** Read the current connector data routing mode (0x1a/0x05 extension). */
@@ -1390,7 +1244,10 @@ export class IcomControl {
       throw new UnsupportedCommandError({ modelId: this.getProfileModelId(), commandName: 'getConnectorDataMode', civCommand: '0x1a/0x05', reason: 'No vendor connector data-mode extension for active profile' });
     }
     const raw = await this.readExtParamValue(ext, 'connector-data-mode', options);
-    return raw === null ? null : (getConnectorModeString(raw) as ConnectorDataMode | undefined) ?? null;
+    if (raw === null) return null;
+    const modes = this.activeProfile.connectorModes;
+    return modes ? (Object.entries(modes).find(([, code]) => code === raw)?.[0] as ConnectorDataMode | undefined) ?? null
+      : (getConnectorModeString(raw) as ConnectorDataMode | undefined) ?? null;
   }
 
   /**
@@ -1429,7 +1286,7 @@ export class IcomControl {
   async setTunerEnabled(enabled: boolean): Promise<void> {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    this.sendCiv(IcomRigCommands.setTunerEnabled(ctrAddr, rigAddr, enabled));
+    await this.writeCiv(IcomRigCommands.setTunerEnabled(ctrAddr, rigAddr, enabled));
   }
 
   /**
@@ -1438,7 +1295,7 @@ export class IcomControl {
   async startManualTune(): Promise<void> {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    this.sendCiv(IcomRigCommands.startManualTune(ctrAddr, rigAddr));
+    await this.writeCiv(IcomRigCommands.startManualTune(ctrAddr, rigAddr));
   }
 
   // ============================================================================
@@ -1453,8 +1310,8 @@ export class IcomControl {
   }
 
   /** Set AF (audio output) gain. Value 0.0–1.0. */
-  setAFGain(value: number): void {
-    this.write0x14Level(0x01, value);
+  async setAFGain(value: number): Promise<void> {
+    await this.write0x14Level(0x01, value);
   }
 
   /** Get squelch level. Returns 0.0–1.0, or null on timeout. */
@@ -1465,8 +1322,8 @@ export class IcomControl {
   }
 
   /** Set squelch level. Value 0.0–1.0. */
-  setSQL(value: number): void {
-    this.write0x14Level(0x03, value);
+  async setSQL(value: number): Promise<void> {
+    await this.write0x14Level(0x03, value);
   }
 
   /** Get RF transmit power. Returns 0.0–1.0, or null on timeout. */
@@ -1477,8 +1334,8 @@ export class IcomControl {
   }
 
   /** Set RF transmit power. Value 0.0–1.0. */
-  setRFPower(value: number): void {
-    this.write0x14Level(0x0a, value);
+  async setRFPower(value: number): Promise<void> {
+    await this.write0x14Level(0x0a, value);
   }
 
   /** Get microphone gain. Returns 0.0–1.0, or null on timeout. */
@@ -1489,8 +1346,8 @@ export class IcomControl {
   }
 
   /** Set microphone gain. Value 0.0–1.0. */
-  setMicGain(value: number): void {
-    this.write0x14Level(CIV.S_LVL_MICGAIN, value);
+  async setMicGain(value: number): Promise<void> {
+    await this.write0x14Level(CIV.S_LVL_MICGAIN, value);
   }
 
   /** Get break-in delay. Returns 0.0–1.0, or null on timeout. */
@@ -1501,8 +1358,8 @@ export class IcomControl {
   }
 
   /** Set break-in delay. Value 0.0–1.0. */
-  setBreakInDelay(value: number): void {
-    this.write0x14Level(CIV.S_LVL_BKINDL, value);
+  async setBreakInDelay(value: number): Promise<void> {
+    await this.write0x14Level(CIV.S_LVL_BKINDL, value);
   }
 
   /** Get noise blanker level. 0.0 = off, >0.0 = on with strength. */
@@ -1513,8 +1370,8 @@ export class IcomControl {
   }
 
   /** Set noise blanker level. Value 0.0 (off) – 1.0. */
-  setNBLevel(value: number): void {
-    this.write0x14Level(0x12, value);
+  async setNBLevel(value: number): Promise<void> {
+    await this.write0x14Level(0x12, value);
   }
 
   /** Get noise reduction level. 0.0 = off, >0.0 = on with strength. */
@@ -1525,8 +1382,8 @@ export class IcomControl {
   }
 
   /** Set noise reduction level. Value 0.0 (off) – 1.0. */
-  setNRLevel(value: number): void {
-    this.write0x14Level(CIV.S_LVL_NR, value);
+  async setNRLevel(value: number): Promise<void> {
+    await this.write0x14Level(CIV.S_LVL_NR, value);
   }
 
   /**
@@ -1767,13 +1624,13 @@ export class IcomControl {
     return raw !== 0;
   }
 
-  setFunction(name: IcomFunctionName, enabled: boolean): void {
+  async setFunction(name: IcomFunctionName, enabled: boolean): Promise<void> {
     if (!this.activeProfile.functions.includes(name)) {
       throw this.unsupported(name, 'setFunction', 'Function is not enabled for active profile');
     }
     const ext = this.activeProfile.extParamSpecs[name];
     if (ext) {
-      this.writeExtParamValue(ext, enabled ? 1 : 0);
+      await this.writeExtParamValue(ext, enabled ? 1 : 0);
       return;
     }
     const spec = FUNCTION_SPECS[name];
@@ -1783,7 +1640,7 @@ export class IcomControl {
     let value = enabled ? 1 : 0;
     if (name === 'SBKIN') value = enabled ? 1 : 0;
     if (name === 'FBKIN') value = enabled ? 2 : 0;
-    this.writeFunctionRaw(spec, value);
+    await this.writeFunctionRaw(spec, value);
   }
 
   async getLevel(name: IcomLevelName, options?: QueryOptions): Promise<number | null> {
@@ -1799,13 +1656,13 @@ export class IcomControl {
     return spec.rawToPublic ? spec.rawToPublic(raw) : spec.dataType === 'level' ? raw / 255 : raw;
   }
 
-  setLevel(name: IcomLevelName, value: number): void {
+  async setLevel(name: IcomLevelName, value: number): Promise<void> {
     if (!this.activeProfile.levels.includes(name)) {
       throw this.unsupported(name, 'setLevel', 'Level is not enabled for active profile');
     }
     const ext = this.activeProfile.extParamSpecs[name];
     if (ext) {
-      this.writeExtParamValue(ext, value);
+      await this.writeExtParamValue(ext, value);
       return;
     }
     const spec = LEVEL_SPECS[name];
@@ -1817,7 +1674,7 @@ export class IcomControl {
       : spec.dataType === 'level'
         ? Math.round(Math.max(0, Math.min(1, value)) * 255)
         : Math.round(value);
-    this.writeLevelRaw(spec, raw);
+    await this.writeLevelRaw(spec, raw);
   }
 
   async getParameter(name: IcomParameterName, options?: QueryOptions): Promise<number | boolean | null> {
@@ -1829,7 +1686,7 @@ export class IcomControl {
     return ext.dataType === 'bool' ? value !== 0 : value;
   }
 
-  setParameter(name: IcomParameterName, value: number | boolean): void {
+  async setParameter(name: IcomParameterName, value: number | boolean): Promise<void> {
     if (!this.activeProfile.parameters.includes(name)) {
       throw this.unsupported(name, 'setParameter', 'Parameter is not enabled for active profile');
     }
@@ -1837,25 +1694,25 @@ export class IcomControl {
     if (!ext) {
       throw this.unsupported(name, 'setParameter', 'No parameter command mapping');
     }
-    this.writeExtParamValue(ext, typeof value === 'boolean' ? (value ? 1 : 0) : value);
+    await this.writeExtParamValue(ext, typeof value === 'boolean' ? (value ? 1 : 0) : value);
   }
 
   async getNoiseBlankerEnabled(options?: QueryOptions) { return this.getFunction('NB', options); }
-  setNoiseBlankerEnabled(enabled: boolean) { this.setFunction('NB', enabled); }
+  async setNoiseBlankerEnabled(enabled: boolean) { await this.setFunction('NB', enabled); }
   async getNoiseReductionEnabled(options?: QueryOptions) { return this.getFunction('NR', options); }
-  setNoiseReductionEnabled(enabled: boolean) { this.setFunction('NR', enabled); }
+  async setNoiseReductionEnabled(enabled: boolean) { await this.setFunction('NR', enabled); }
   async getCompressorEnabled(options?: QueryOptions) { return this.getFunction('COMP', options); }
-  setCompressorEnabled(enabled: boolean) { this.setFunction('COMP', enabled); }
+  async setCompressorEnabled(enabled: boolean) { await this.setFunction('COMP', enabled); }
   async getVoxEnabled(options?: QueryOptions) { return this.getFunction('VOX', options); }
-  setVoxEnabled(enabled: boolean) { this.setFunction('VOX', enabled); }
+  async setVoxEnabled(enabled: boolean) { await this.setFunction('VOX', enabled); }
   async getMonitorEnabled(options?: QueryOptions) { return this.getFunction('MON', options); }
-  setMonitorEnabled(enabled: boolean) { this.setFunction('MON', enabled); }
+  async setMonitorEnabled(enabled: boolean) { await this.setFunction('MON', enabled); }
   async getAutoNotchEnabled(options?: QueryOptions) { return this.getFunction('ANF', options); }
-  setAutoNotchEnabled(enabled: boolean) { this.setFunction('ANF', enabled); }
+  async setAutoNotchEnabled(enabled: boolean) { await this.setFunction('ANF', enabled); }
   async getManualNotchEnabled(options?: QueryOptions) { return this.getFunction('MN', options); }
-  setManualNotchEnabled(enabled: boolean) { this.setFunction('MN', enabled); }
+  async setManualNotchEnabled(enabled: boolean) { await this.setFunction('MN', enabled); }
   async getDialLockEnabled(options?: QueryOptions) { return this.getFunction('LOCK', options); }
-  setDialLockEnabled(enabled: boolean) { this.setFunction('LOCK', enabled); }
+  async setDialLockEnabled(enabled: boolean) { await this.setFunction('LOCK', enabled); }
 
   async getBreakInMode(options?: QueryOptions): Promise<'off' | 'semi' | 'full' | null> {
     const spec = FUNCTION_SPECS.SBKIN;
@@ -1865,26 +1722,26 @@ export class IcomControl {
     return raw === 1 ? 'semi' : raw === 2 ? 'full' : 'off';
   }
 
-  setBreakInMode(mode: 'off' | 'semi' | 'full'): void {
+  async setBreakInMode(mode: 'off' | 'semi' | 'full'): Promise<void> {
     const spec = FUNCTION_SPECS.SBKIN;
     if (!spec || !this.activeProfile.functions.includes('SBKIN')) {
       throw this.unsupported('SBKIN', 'setBreakInMode', 'Break-in function is not enabled for active profile');
     }
-    this.writeFunctionRaw(spec, mode === 'semi' ? 1 : mode === 'full' ? 2 : 0);
+    await this.writeFunctionRaw(spec, mode === 'semi' ? 1 : mode === 'full' ? 2 : 0);
   }
 
   async getRFGain(options?: QueryOptions) { return this.getLevel('RF', options); }
-  setRFGain(value: number) { this.setLevel('RF', value); }
+  async setRFGain(value: number) { await this.setLevel('RF', value); }
   async getIFShift(options?: QueryOptions) { return this.getLevel('IF', options); }
-  setIFShift(value: number) { this.setLevel('IF', value); }
+  async setIFShift(value: number) { await this.setLevel('IF', value); }
   async getPbtIn(options?: QueryOptions) { return this.getLevel('PBT_IN', options); }
-  setPbtIn(value: number) { this.setLevel('PBT_IN', value); }
+  async setPbtIn(value: number) { await this.setLevel('PBT_IN', value); }
   async getPbtOut(options?: QueryOptions) { return this.getLevel('PBT_OUT', options); }
-  setPbtOut(value: number) { this.setLevel('PBT_OUT', value); }
+  async setPbtOut(value: number) { await this.setLevel('PBT_OUT', value); }
   async getCwPitch(options?: QueryOptions) { return this.getLevel('CWPITCH', options); }
-  setCwPitch(hz: number) { this.setLevel('CWPITCH', hz); }
+  async setCwPitch(hz: number) { await this.setLevel('CWPITCH', hz); }
   async getKeySpeed(options?: QueryOptions) { return this.getLevel('KEYSPD', options); }
-  setKeySpeed(wpm: number) { this.setLevel('KEYSPD', wpm); }
+  async setKeySpeed(wpm: number) { await this.setLevel('KEYSPD', wpm); }
 
   async sendMorse(text: string, options: SendMorseOptions = {}): Promise<void> {
     const normalized = IcomControl.normalizeMorseText(text);
@@ -1945,24 +1802,24 @@ export class IcomControl {
   }
 
   async getNotchRaw(options?: QueryOptions) { return this.getLevel('NOTCHF_RAW', options); }
-  setNotchRaw(value: number) { this.setLevel('NOTCHF_RAW', value); }
+  async setNotchRaw(value: number) { await this.setLevel('NOTCHF_RAW', value); }
   async getCompressionLevel(options?: QueryOptions) { return this.getLevel('COMP', options); }
-  setCompressionLevel(value: number) { this.setLevel('COMP', value); }
+  async setCompressionLevel(value: number) { await this.setLevel('COMP', value); }
   async getMonitorGain(options?: QueryOptions) { return this.getLevel('MONITOR_GAIN', options); }
-  setMonitorGain(value: number) { this.setLevel('MONITOR_GAIN', value); }
+  async setMonitorGain(value: number) { await this.setLevel('MONITOR_GAIN', value); }
   async getVoxGain(options?: QueryOptions) { return this.getLevel('VOXGAIN', options); }
-  setVoxGain(value: number) { this.setLevel('VOXGAIN', value); }
+  async setVoxGain(value: number) { await this.setLevel('VOXGAIN', value); }
   async getAntiVox(options?: QueryOptions) { return this.getLevel('ANTIVOX', options); }
-  setAntiVox(value: number) { this.setLevel('ANTIVOX', value); }
+  async setAntiVox(value: number) { await this.setLevel('ANTIVOX', value); }
 
   async getRitOffset(options?: QueryOptions) { return this.readRitOffset(options); }
-  setRitOffset(offsetHz: number) { this.writeRitOffset(offsetHz); }
+  async setRitOffset(offsetHz: number) { await this.writeRitOffset(offsetHz); }
   async getXitOffset(options?: QueryOptions) { return this.readRitOffset(options); }
-  setXitOffset(offsetHz: number) { this.writeRitOffset(offsetHz); }
+  async setXitOffset(offsetHz: number) { await this.writeRitOffset(offsetHz); }
   async getRitEnabled(options?: QueryOptions) { return this.getFunction('RIT', options); }
-  setRitEnabled(enabled: boolean) { this.setFunction('RIT', enabled); }
+  async setRitEnabled(enabled: boolean) { await this.setFunction('RIT', enabled); }
   async getXitEnabled(options?: QueryOptions) { return this.getFunction('XIT', options); }
-  setXitEnabled(enabled: boolean) { this.setFunction('XIT', enabled); }
+  async setXitEnabled(enabled: boolean) { await this.setFunction('XIT', enabled); }
 
   async getVfo(options?: QueryOptions): Promise<IcomVfoName | null> {
     const timeoutMs = options?.timeout ?? 3000;
@@ -1974,17 +1831,17 @@ export class IcomControl {
     return resp[6] === 0 ? 'MAIN' : 'SUB';
   }
 
-  setVfo(vfo: IcomVfoName): void {
+  async setVfo(vfo: IcomVfoName): Promise<void> {
     const subcmd = this.vfoToSubcmd(vfo);
     if (subcmd === null) {
       throw this.unsupported(vfo, 'setVfo', 'VFO cannot be directly selected');
     }
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    this.sendCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_SET_VFO, subcmd));
+    await this.writeCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_SET_VFO, subcmd));
   }
 
-  vfoOperation(op: IcomVfoOperation): void {
+  async vfoOperation(op: IcomVfoOperation): Promise<void> {
     if (!this.activeProfile.vfoOps.includes(op)) {
       throw this.unsupported(op, 'vfoOperation', 'VFO operation is not enabled for active profile');
     }
@@ -1992,22 +1849,22 @@ export class IcomControl {
     const rigAddr = this.civ.civAddress & 0xff;
     switch (op) {
       case 'copy':
-        this.sendCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_SET_VFO, CIV.S_BTOA));
+        await this.writeCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_SET_VFO, CIV.S_BTOA));
         return;
       case 'exchange':
-        this.sendCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_SET_VFO, CIV.S_XCHNG));
+        await this.writeCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_SET_VFO, CIV.S_XCHNG));
         return;
       case 'from-vfo':
-        this.sendCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_WR_MEM, undefined));
+        await this.writeCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_WR_MEM, undefined));
         return;
       case 'to-vfo':
-        this.sendCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_MEM2VFO, undefined));
+        await this.writeCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_MEM2VFO, undefined));
         return;
       case 'memory-clear':
-        this.sendCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_CLR_MEM, undefined));
+        await this.writeCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_CLR_MEM, undefined));
         return;
       case 'tune':
-        this.sendCiv(IcomRigCommands.startManualTune(ctrAddr, rigAddr));
+        await this.writeCiv(IcomRigCommands.startManualTune(ctrAddr, rigAddr));
         return;
     }
   }
@@ -2018,10 +1875,10 @@ export class IcomControl {
     return raw === CIV.S_SPLT_ON;
   }
 
-  setSplitEnabled(enabled: boolean): void {
+  async setSplitEnabled(enabled: boolean): Promise<void> {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    this.sendCiv(IcomRigCommands.setSplit(ctrAddr, rigAddr, enabled));
+    await this.writeCiv(IcomRigCommands.setSplit(ctrAddr, rigAddr, enabled));
   }
 
   async getSplitFrequency(options?: QueryOptions): Promise<number | null> {
@@ -2033,10 +1890,10 @@ export class IcomControl {
     return resp ? IcomControl.parseFrequencyReply(resp, 1) : null;
   }
 
-  setSplitFrequency(hz: number): void {
+  async setSplitFrequency(hz: number): Promise<void> {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    this.sendCiv(IcomRigCommands.setSelectedFrequency(ctrAddr, rigAddr, hz, this.activeProfile.frequencyBcdBytes(hz), 1));
+    await this.writeCiv(IcomRigCommands.setSelectedFrequency(ctrAddr, rigAddr, hz, this.activeProfile.frequencyBcdBytes(hz), 1));
   }
 
   async getSplitMode(options?: QueryOptions): Promise<{ mode: number; filter?: number; modeName?: string; filterName?: string; dataMode?: boolean } | null> {
@@ -2053,12 +1910,12 @@ export class IcomControl {
     return { mode, filter, dataMode, modeName: getModeString(mode), filterName: getFilterString(filter) };
   }
 
-  setSplitMode(mode: IcomMode | number, options?: SetModeOptions): void {
+  async setSplitMode(mode: IcomMode | number, options?: SetModeOptions): Promise<void> {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
     const modeCode = typeof mode === 'string' ? getModeCode(mode) : mode;
     const filter = options?.filter ?? this.lastFilter ?? this.activeProfile.defaultFilter;
-    this.sendCiv(IcomRigCommands.setSelectedMode(ctrAddr, rigAddr, modeCode, !!options?.dataMode, filter, 1));
+    await this.writeCiv(IcomRigCommands.setSelectedMode(ctrAddr, rigAddr, modeCode, !!options?.dataMode, filter, 1));
   }
 
   async getTuningStep(options?: QueryOptions): Promise<number | null> {
@@ -2071,14 +1928,14 @@ export class IcomControl {
     return this.activeProfile.tuningSteps.find((step) => step.code === resp[5])?.hz ?? null;
   }
 
-  setTuningStep(hz: number): void {
+  async setTuningStep(hz: number): Promise<void> {
     const matched = this.activeProfile.tuningSteps.find((step) => step.hz === hz);
     if (!matched) {
       throw this.unsupported(String(hz), 'setTuningStep', 'Tuning step is not enabled for active profile');
     }
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    this.sendCiv(IcomRigCommands.setTuningStep(ctrAddr, rigAddr, matched.code));
+    await this.writeCiv(IcomRigCommands.setTuningStep(ctrAddr, rigAddr, matched.code));
   }
 
   async getRepeaterShift(options?: QueryOptions): Promise<IcomRepeaterShift | null> {
@@ -2089,14 +1946,14 @@ export class IcomControl {
     return 'none';
   }
 
-  setRepeaterShift(shift: IcomRepeaterShift): void {
+  async setRepeaterShift(shift: IcomRepeaterShift): Promise<void> {
     if (!this.activeProfile.repeater) {
       throw this.unsupported(shift, 'setRepeaterShift', 'Repeater controls are not enabled for active profile');
     }
     const code = shift === 'minus' ? CIV.S_DUP_M : shift === 'plus' ? CIV.S_DUP_P : CIV.S_DUP_OFF;
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    this.sendCiv(IcomRigCommands.setRepeaterShift(ctrAddr, rigAddr, code));
+    await this.writeCiv(IcomRigCommands.setRepeaterShift(ctrAddr, rigAddr, code));
   }
 
   async getRepeaterOffset(options?: QueryOptions): Promise<number | null> {
@@ -2109,25 +1966,25 @@ export class IcomControl {
     return decodeFrequencyBcdLE(resp.subarray(5, 8)) * 100;
   }
 
-  setRepeaterOffset(offsetHz: number): void {
+  async setRepeaterOffset(offsetHz: number): Promise<void> {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    this.sendCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_SET_OFFS, undefined, encodeFrequencyBcdLE(Math.round(offsetHz / 100), 3)));
+    await this.writeCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_SET_OFFS, undefined, encodeFrequencyBcdLE(Math.round(offsetHz / 100), 3)));
   }
 
   async getToneFrequency(options?: QueryOptions) { return this.readTone(CIV.S_TONE_RPTR, options); }
-  setToneFrequency(hz: number) { this.writeTone(CIV.S_TONE_RPTR, hz); }
+  async setToneFrequency(hz: number) { await this.writeTone(CIV.S_TONE_RPTR, hz); }
   async getToneSquelchFrequency(options?: QueryOptions) { return this.readTone(CIV.S_TONE_SQL, options); }
-  setToneSquelchFrequency(hz: number) { this.writeTone(CIV.S_TONE_SQL, hz); }
+  async setToneSquelchFrequency(hz: number) { await this.writeTone(CIV.S_TONE_SQL, hz); }
 
   async getBeepEnabled(options?: QueryOptions) { return this.getParameter('BEEP', options) as Promise<boolean | null>; }
-  setBeepEnabled(enabled: boolean) { this.setParameter('BEEP', enabled); }
+  async setBeepEnabled(enabled: boolean) { await this.setParameter('BEEP', enabled); }
   async getBacklight(options?: QueryOptions) { return this.getParameter('BACKLIGHT', options) as Promise<number | null>; }
-  setBacklight(value: number) { this.setParameter('BACKLIGHT', value); }
+  async setBacklight(value: number) { await this.setParameter('BACKLIGHT', value); }
   async getScreenSaver(options?: QueryOptions) { return this.getParameter('SCREENSAVER', options) as Promise<number | null>; }
-  setScreenSaver(value: number) { this.setParameter('SCREENSAVER', value); }
+  async setScreenSaver(value: number) { await this.setParameter('SCREENSAVER', value); }
   async getKeyerType(options?: QueryOptions) { return this.getParameter('KEYERTYPE', options) as Promise<number | null>; }
-  setKeyerType(value: number) { this.setParameter('KEYERTYPE', value); }
+  async setKeyerType(value: number) { await this.setParameter('KEYERTYPE', value); }
 
   async getAudioIfMode(options?: QueryOptions): Promise<IcomAudioIfSource | null> {
     for (const source of ['wlan', 'lan', 'acc'] as IcomAudioIfSource[]) {
@@ -2140,32 +1997,32 @@ export class IcomControl {
     return this.activeProfile.audioIfSources.includes('default') ? 'default' : null;
   }
 
-  setAudioIfMode(source: IcomAudioIfSource): void {
+  async setAudioIfMode(source: IcomAudioIfSource): Promise<void> {
     if (!this.activeProfile.audioIfSources.includes(source)) {
       throw this.unsupported(source, 'setAudioIfMode', 'Audio IF source is not enabled for active profile');
     }
     for (const candidate of ['wlan', 'lan', 'acc'] as IcomAudioIfSource[]) {
       const parm = this.audioIfSourceToParameter(candidate);
       if (parm && this.activeProfile.parameters.includes(parm)) {
-        this.setParameter(parm, source === candidate);
+        await this.setParameter(parm, source === candidate);
       }
     }
     if (this.activeProfile.parameters.includes('AFIF')) {
-      this.setParameter('AFIF', source !== 'default');
+      await this.setParameter('AFIF', source !== 'default');
     }
   }
 
   async getSpectrumDataOutput(options?: QueryOptions): Promise<boolean | null> {
     return this.getScopeBoolean(CIV.S_SCP_DOP, [], 'spectrum:data-output', options);
   }
-  setSpectrumDataOutput(enabled: boolean): void { this.writeScopeSimple(CIV.S_SCP_DOP, [enabled ? 1 : 0]); }
+  async setSpectrumDataOutput(enabled: boolean): Promise<void> { await this.writeScopeSimple(CIV.S_SCP_DOP, [enabled ? 1 : 0]); }
   async getSpectrumHold(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<boolean | null> {
     const receiver = options?.receiver ?? 0;
     return this.getScopeBoolean(CIV.S_SCP_HLD, [receiver], `spectrum:hold:${receiver}`, options);
   }
-  setSpectrumHold(enabled: boolean, options?: { receiver?: 0 | 1 }): void {
+  async setSpectrumHold(enabled: boolean, options?: { receiver?: 0 | 1 }): Promise<void> {
     const receiver = options?.receiver ?? 0;
-    this.writeScopeSimple(CIV.S_SCP_HLD, [receiver, enabled ? 1 : 0]);
+    await this.writeScopeSimple(CIV.S_SCP_HLD, [receiver, enabled ? 1 : 0]);
   }
   async getSpectrumSpeed(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<IcomSpectrumSpeed | null> {
     const receiver = options?.receiver ?? 0;
@@ -2173,10 +2030,10 @@ export class IcomControl {
     if (raw === null) return null;
     return raw === 0 ? 'fast' : raw === 1 ? 'mid' : 'slow';
   }
-  setSpectrumSpeed(speed: IcomSpectrumSpeed, options?: { receiver?: 0 | 1 }): void {
+  async setSpectrumSpeed(speed: IcomSpectrumSpeed, options?: { receiver?: 0 | 1 }): Promise<void> {
     const receiver = options?.receiver ?? 0;
     const raw = speed === 'fast' ? 0 : speed === 'mid' ? 1 : 2;
-    this.writeScopeSimple(CIV.S_SCP_SWP, [receiver, raw]);
+    await this.writeScopeSimple(CIV.S_SCP_SWP, [receiver, raw]);
   }
   async getSpectrumRef(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<number | null> {
     const receiver = options?.receiver ?? 0;
@@ -2189,41 +2046,41 @@ export class IcomControl {
     const value = decodeBcdBE(resp.subarray(7, 9)) / 100;
     return resp[9] ? -value : value;
   }
-  setSpectrumRef(db: number, options?: { receiver?: 0 | 1 }): void {
+  async setSpectrumRef(db: number, options?: { receiver?: 0 | 1 }): Promise<void> {
     const receiver = options?.receiver ?? 0;
     const rounded = Math.round(db * 2) / 2;
-    this.writeScopeSimple(CIV.S_SCP_REF, [receiver, ...encodeBcdBE(Math.abs(Math.round(rounded * 100)), 2), rounded < 0 ? 1 : 0]);
+    await this.writeScopeSimple(CIV.S_SCP_REF, [receiver, ...encodeBcdBE(Math.abs(Math.round(rounded * 100)), 2), rounded < 0 ? 1 : 0]);
   }
   async getSpectrumAverage(options?: QueryOptions): Promise<number | null> { return this.getLevel('SPECTRUM_AVG', options); }
-  setSpectrumAverage(value: number): void { this.setLevel('SPECTRUM_AVG', value); }
+  async setSpectrumAverage(value: number): Promise<void> { await this.setLevel('SPECTRUM_AVG', value); }
   async getSpectrumVbw(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<number | null> {
     const receiver = options?.receiver ?? 0;
     return this.getScopeByte(CIV.S_SCP_VBW, [receiver], `spectrum:vbw:${receiver}`, options);
   }
-  setSpectrumVbw(value: number, options?: { receiver?: 0 | 1 }): void {
+  async setSpectrumVbw(value: number, options?: { receiver?: 0 | 1 }): Promise<void> {
     const receiver = options?.receiver ?? 0;
-    this.writeScopeSimple(CIV.S_SCP_VBW, [receiver, Math.max(0, Math.min(1, Math.trunc(value)))]);
+    await this.writeScopeSimple(CIV.S_SCP_VBW, [receiver, Math.max(0, Math.min(1, Math.trunc(value)))]);
   }
   async getSpectrumRbw(options?: QueryOptions & { receiver?: 0 | 1 }): Promise<number | null> {
     const receiver = options?.receiver ?? 0;
     return this.getScopeByte(CIV.S_SCP_RBW, [receiver], `spectrum:rbw:${receiver}`, options);
   }
-  setSpectrumRbw(value: number, options?: { receiver?: 0 | 1 }): void {
+  async setSpectrumRbw(value: number, options?: { receiver?: 0 | 1 }): Promise<void> {
     const receiver = options?.receiver ?? 0;
-    this.writeScopeSimple(CIV.S_SCP_RBW, [receiver, Math.max(0, Math.min(2, Math.trunc(value)))]);
+    await this.writeScopeSimple(CIV.S_SCP_RBW, [receiver, Math.max(0, Math.min(2, Math.trunc(value)))]);
   }
   async getSpectrumDuringTx(options?: QueryOptions): Promise<boolean | null> {
     return this.getScopeBoolean(CIV.S_SCP_STX, [], 'spectrum:during-tx', options);
   }
-  setSpectrumDuringTx(enabled: boolean): void { this.writeScopeSimple(CIV.S_SCP_STX, [enabled ? 1 : 0]); }
+  async setSpectrumDuringTx(enabled: boolean): Promise<void> { await this.writeScopeSimple(CIV.S_SCP_STX, [enabled ? 1 : 0]); }
   async getSpectrumCenterType(options?: QueryOptions): Promise<IcomSpectrumCenterType | null> {
     const raw = await this.getScopeByte(CIV.S_SCP_CFQ, [], 'spectrum:center-type', options);
     if (raw === null) return null;
     return raw === 1 ? 'carrier-point-center' : raw === 2 ? 'carrier-point-center-abs' : 'filter-center';
   }
-  setSpectrumCenterType(type: IcomSpectrumCenterType): void {
+  async setSpectrumCenterType(type: IcomSpectrumCenterType): Promise<void> {
     const raw = type === 'carrier-point-center' ? 1 : type === 'carrier-point-center-abs' ? 2 : 0;
-    this.writeScopeSimple(CIV.S_SCP_CFQ, [raw]);
+    await this.writeScopeSimple(CIV.S_SCP_CFQ, [raw]);
   }
 
   private unsupported(commandName: string, api: string, reason: string) {
@@ -2272,11 +2129,11 @@ export class IcomControl {
     return index < resp.length - 1 ? resp[index] : null;
   }
 
-  private writeFunctionRaw(spec: { command: number; subcmd: number; payloadPrefix?: number[] }, value: number): void {
+  private async writeFunctionRaw(spec: { command: number; subcmd: number; payloadPrefix?: number[] }, value: number): Promise<void> {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
     const payload = [...(spec.payloadPrefix ?? []), value & 0xff];
-    this.sendCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, spec.command, spec.subcmd, payload));
+    await this.writeCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, spec.command, spec.subcmd, payload));
   }
 
   private async readLevelRaw(name: IcomLevelName, spec: LevelSpec, options?: QueryOptions): Promise<number | null> {
@@ -2292,10 +2149,10 @@ export class IcomControl {
     return decodeBcdBE(data.subarray(0, spec.dataBytes));
   }
 
-  private writeLevelRaw(spec: LevelSpec, raw: number): void {
+  private async writeLevelRaw(spec: LevelSpec, raw: number): Promise<void> {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    this.sendCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, spec.command, spec.subcmd, IcomControl.encodeDataValue(raw, spec.dataType, spec.dataBytes)));
+    await this.writeCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, spec.command, spec.subcmd, IcomControl.encodeDataValue(raw, spec.dataType, spec.dataBytes)));
   }
 
   private async readExtParamValue(ext: IcomExtParam, keyPrefix: string, options?: QueryOptions): Promise<number | null> {
@@ -2311,12 +2168,12 @@ export class IcomControl {
     return IcomControl.decodeDataValue(resp.subarray(start, resp.length - 1), ext.dataType, ext.dataBytes);
   }
 
-  private writeExtParamValue(ext: IcomExtParam, value: number): void {
+  private async writeExtParamValue(ext: IcomExtParam, value: number): Promise<void> {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
     const raw = ext.dataType === 'level' ? Math.round(Math.max(0, Math.min(1, value)) * 255) : Math.round(value);
     const payload = IcomControl.encodeDataValue(raw, ext.dataType, ext.dataBytes);
-    this.sendCiv(IcomRigCommands.writeExtParam(ctrAddr, rigAddr, ext.command, ext.subcmd, ext.subext, payload));
+    await this.writeCiv(IcomRigCommands.writeExtParam(ctrAddr, rigAddr, ext.command, ext.subcmd, ext.subext, payload));
   }
 
   private static encodeDataValue(value: number, dataType: IcomExtParam['dataType'], bytes: number): Buffer {
@@ -2352,11 +2209,11 @@ export class IcomControl {
     return resp[8] === 0 ? value : -value;
   }
 
-  private writeRitOffset(offsetHz: number): void {
+  private async writeRitOffset(offsetHz: number): Promise<void> {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
     const payload = [...encodeFrequencyBcdLE(Math.abs(Math.round(offsetHz)), 2), offsetHz < 0 ? 1 : 0];
-    this.sendCiv(IcomRigCommands.setRitOffset(ctrAddr, rigAddr, payload));
+    await this.writeCiv(IcomRigCommands.setRitOffset(ctrAddr, rigAddr, payload));
   }
 
   private vfoToSubcmd(vfo: IcomVfoName): number | null {
@@ -2396,13 +2253,13 @@ export class IcomControl {
     return decodeBcdBE(resp.subarray(6, 9)) / 10;
   }
 
-  private writeTone(subcmd: number, hz: number): void {
+  private async writeTone(subcmd: number, hz: number): Promise<void> {
     if (!this.activeProfile.tone) {
       throw this.unsupported(String(subcmd), 'setToneFrequency', 'Tone controls are not enabled for active profile');
     }
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    this.sendCiv(IcomRigCommands.setTone(ctrAddr, rigAddr, subcmd, Math.round(hz * 10)));
+    await this.writeCiv(IcomRigCommands.setTone(ctrAddr, rigAddr, subcmd, Math.round(hz * 10)));
   }
 
   private audioIfSourceToParameter(source: IcomAudioIfSource): IcomParameterName | null {
@@ -2430,10 +2287,10 @@ export class IcomControl {
     return index < resp.length - 1 ? resp[index] : null;
   }
 
-  private writeScopeSimple(subcmd: number, payload: number[]): void {
+  private async writeScopeSimple(subcmd: number, payload: number[]): Promise<void> {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
-    this.sendCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_CTL_SCP, subcmd, payload));
+    await this.writeCiv(IcomRigCommands.writeCommand(ctrAddr, rigAddr, CIV.C_CTL_SCP, subcmd, payload));
   }
 
   private static isReplyOf(frame: Buffer, cmd: number, ctrAddr: number, rigAddr: number) {
@@ -2517,7 +2374,7 @@ export class IcomControl {
     return normalized;
   }
 
-  private async waitForCiv(predicate: (frame: Buffer) => boolean, timeoutMs: number, onSend?: () => void): Promise<Buffer | null> {
+  private async waitForCiv(predicate: (frame: Buffer) => boolean, timeoutMs: number, onSend?: () => void, abortQueueOnTimeout = false): Promise<Buffer | null> {
     return new Promise<Buffer | null>((resolve) => {
       let done = false;
       const onFrame = (data: { pcm16?: Buffer } | Buffer) => {
@@ -2562,6 +2419,13 @@ export class IcomControl {
   sendAudioPcm16(samples: Int16Array) { this.audio.enqueuePcm16(samples); }
 
   private onData(buf: Buffer) {
+    if (buf.length < 16 || le32.read(buf, 0) !== buf.length) return;
+    if (ControlPacket.getType(buf) === Cmd.RETRANSMIT) {
+      if (buf.length === 16 || (buf.length - 16) % 4 === 0) this.sess.handleRetransmit(buf);
+      return;
+    }
+    if (this.connectionSession.phase === ConnectionPhase.DISCONNECTING) return;
+
     // common demux by length
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     // dbg/dbgV imported at top
@@ -2577,6 +2441,8 @@ export class IcomControl {
           // ask ready
           this.sess.sendUntracked(ControlPacket.toBytes(Cmd.ARE_YOU_READY, 1, this.sess.localId, this.sess.remoteId));
         } else if (type === Cmd.I_AM_READY) {
+          if (this.authenticated) break;
+          this.handshakeStage = 'login';
           dbg('I_AM_READY -> send login');
           // send login
           const login = LoginPacket.build(0, this.sess.localId, this.sess.remoteId, this.sess.innerSeq,
@@ -2589,6 +2455,7 @@ export class IcomControl {
       }
       case Sizes.TOKEN: {
         // token renewal / confirm responses
+        if (TokenPacket.getTokRequest(buf) !== this.sess.localToken) return;
         const reqType = TokenPacket.getRequestType(buf);
         const reqReply = TokenPacket.getRequestReply(buf);
         dbg('TOKEN <= type=', reqType, 'reply=', reqReply);
@@ -2596,13 +2463,11 @@ export class IcomControl {
           const response = TokenPacket.getResponse(buf);
         dbgV('TOKEN renewal response=', response);
           if (response === 0x00000000) {
-            // ok
+            this.tokenRenewedAt = Date.now();
           } else if (response === 0xffffffff) {
-            // rejected; attempt re-connect
-            this.sess.remoteId = ControlPacket.getSentId(buf);
-            this.sess.localToken = TokenPacket.getTokRequest(buf);
-            this.sess.rigToken = TokenPacket.getToken(buf);
-            this.sendConnectionRequest();
+            this.options.logger?.('ICOM token renewal rejected');
+            if (this.connectionSession.phase === ConnectionPhase.CONNECTED) this.handleConnectionLost(SessionType.CONTROL, 0);
+            else this.abortConnectionAttempt(this.connectionSession.sessionId, DisconnectReason.ERROR);
           }
         }
         break;
@@ -2645,17 +2510,28 @@ export class IcomControl {
           break;
         }
 
-        const info: StatusInfo = { civPort, audioPort, authOK: true, connected: true };
+        if (!authOK) {
+          this.abortConnectionAttempt(this.connectionSession.sessionId, DisconnectReason.ERROR);
+          if (this.connectionSession.phase === ConnectionPhase.CONNECTED) this.handleConnectionLost(SessionType.CONTROL, 0);
+          return;
+        }
+        const info: StatusInfo = { civPort, audioPort, authOK, connected };
         this.ev.emit('status', info);
 
         // Only set remote ports and start sessions if ports are valid (non-zero)
+        if (this.streamsStarted) return;
+        this.streamsStarted = true;
         dbg('STATUS has valid ports - setting up CIV/Audio sessions');
-        if (this.civSess) { this.civSess.setRemote(this.options.control.ip, civPort); this.civSess.startAreYouThere(); this.civ.start(); }
-        if (this.audioSess) { this.audioSess.setRemote(this.options.control.ip, audioPort); this.audioSess.startAreYouThere(); }
+        if (this.civSess) { this.civSess.setRemote(this.sess.remoteAddress.ip, civPort); this.civSess.startAreYouThere(); this.civ.start(); }
+        if (this.audioSess) { this.audioSess.setRemote(this.sess.remoteAddress.ip, audioPort); this.audioSess.startAreYouThere(); }
         break;
       }
       case Sizes.LOGIN_RESPONSE: {
+        if (TokenPacket.getTokRequest(buf) !== this.sess.localToken) return;
         const ok = LoginResponsePacket.authOK(buf);
+        if (ok && this.authenticated) return;
+        this.authenticated = ok;
+        this.tokenRenewedAt = Date.now();
         dbg('LOGIN_RESPONSE ok=', ok, 'conn=', LoginResponsePacket.getConnection(buf));
         if (ok) {
           this.sess.rigToken = LoginResponsePacket.getToken(buf);
@@ -2714,7 +2590,15 @@ export class IcomControl {
           dbg('Sending ConnInfo reply anyway to allow STATUS packet delivery');
         }
 
-        // ALWAYS send reply (even when busy=true during reconnection)
+        // A second CONNINFO is commonly our own allocation notification.
+        if (this.streamRequested) return;
+        if (busy) {
+          this.abortConnectionAttempt(this.connectionSession.sessionId, DisconnectReason.ERROR);
+          this.options.logger?.('ICOM radio is busy');
+          return;
+        }
+        this.streamRequested = true;
+        // Request the streams once for this authenticated generation.
         const reply = ConnInfoPacket.connInfoPacketData(
           buf, 0, this.sess.localId, this.sess.remoteId, 0x01, 0x03, this.sess.innerSeq, this.sess.localToken, this.sess.rigToken,
           this.rigName, this.options.userName, AUDIO_SAMPLE_RATE, AUDIO_SAMPLE_RATE, this.civSess.localPort, this.audioSess.localPort, XIEGU_TX_BUFFER_SIZE
@@ -2742,7 +2626,7 @@ export class IcomControl {
           (buf[0x10] === 0x97 || buf[0x10] === 0x00) &&
           ((buf[0x11] === 0x81) || (buf[0x11] === 0x80))
         ) {
-          const len = buf.readUInt16BE(0x16);
+          const len = be16.read(buf, 0x16);
           const audio = Buffer.from(buf.subarray(0x18, 0x18 + len));
           dbg('AUDIO <=', audio.length, 'bytes');
           this.ev.emit('audio', { pcm16: audio });
@@ -2753,7 +2637,7 @@ export class IcomControl {
         } else if (ControlPacket.getType(buf) === Cmd.RETRANSMIT && buf.length > Sizes.CONTROL) {
           dbgV('RETRANSMIT <= multi count=', Math.floor((buf.length - 0x10)/2));
           for (let i = 0x10; i + 1 < buf.length; i += 2) {
-            const seq = buf.readUInt16LE(i);
+            const seq = le16.read(buf, i);
             this.sess.retransmit(seq);
           }
         } else if (buf.length === Sizes.PING && Cmd.PING === ControlPacket.getType(buf)) {
@@ -2774,6 +2658,13 @@ export class IcomControl {
   }
 
   private onCivData(buf: Buffer) {
+    if (buf.length < 16 || le32.read(buf, 0) !== buf.length) return;
+    if (ControlPacket.getType(buf) === Cmd.RETRANSMIT) {
+      if (buf.length === 16 || (buf.length - 16) % 4 === 0) this.civSess.handleRetransmit(buf);
+      return;
+    }
+    if (this.connectionSession.phase === ConnectionPhase.DISCONNECTING) return;
+
     // mirror some generic handling on sub-session
     if (buf.length === Sizes.CONTROL) {
       const type = ControlPacket.getType(buf);
@@ -2822,7 +2713,7 @@ export class IcomControl {
     if (buf.length === Sizes.CONTROL && ControlPacket.getType(buf) === Cmd.RETRANSMIT) {
       this.civSess?.retransmit(ControlPacket.getSeq(buf));
     } else if (ControlPacket.getType(buf) === Cmd.RETRANSMIT && buf.length > Sizes.CONTROL) {
-      for (let i = 0x10; i + 1 < buf.length; i += 2) this.civSess?.retransmit(buf.readUInt16LE(i));
+      for (let i = 0x10; i + 1 < buf.length; i += 2) this.civSess?.retransmit(le16.read(buf, i));
     }
   }
 
@@ -2830,6 +2721,7 @@ export class IcomControl {
   private processCivPayload(payload: Buffer) {
     // Append new data
     this.civAssembleBuf = Buffer.concat([this.civAssembleBuf, payload]);
+    if (this.civAssembleBuf.length > 8192) this.civAssembleBuf = this.civAssembleBuf.subarray(-8192);
 
     // Try to extract frames in a loop
     while (true) {
@@ -2852,10 +2744,12 @@ export class IcomControl {
       for (let i = 2; i < this.civAssembleBuf.length; i++) {
         if (this.civAssembleBuf[i] === 0xfd) { end = i; break; }
       }
-      if (end < 0) {
-        // Incomplete frame, wait for more data
-        return;
+      const nextStart = this.civAssembleBuf.indexOf(Buffer.from([0xfe, 0xfe]), 2);
+      if (nextStart >= 0 && (end < 0 || nextStart < end)) {
+        this.civAssembleBuf = this.civAssembleBuf.subarray(nextStart);
+        continue;
       }
+      if (end < 0) return;
 
       // Extract frame [0..end]
       const frame = Buffer.from(this.civAssembleBuf.subarray(0, end + 1));
@@ -2869,11 +2763,13 @@ export class IcomControl {
   }
 
   // Wait for a CI-V reply by response key. Same-key queries are deduplicated.
-  private async waitForCivFrame(key: string, predicate: (frame: Buffer) => boolean, timeoutMs: number, onSend?: () => void): Promise<Buffer | null> {
+  private async waitForCivFrame(key: string, predicate: (frame: Buffer) => boolean, timeoutMs: number, onSend?: () => void, abortQueueOnTimeout = false): Promise<Buffer | null> {
     return this.civRequestManager.query({
       key,
       predicate,
+      rejectPredicate: frame => !key.startsWith('cw:ack:') && IcomControl.matchAckNakFrame(frame, DEFAULT_CONTROLLER_ADDR, this.civ.civAddress & 0xff) && frame[4] === 0xfa,
       timeoutMs,
+      abortQueueOnTimeout,
       send: () => { if (onSend) onSend(); },
     });
   }
@@ -2928,31 +2824,22 @@ export class IcomControl {
    * Write a 0x14 level value to the radio.
    * @param value - Normalized value 0.0-1.0
    */
-  private write0x14Level(subcmd: number, value: number): void {
+  private async write0x14Level(subcmd: number, value: number): Promise<void> {
     const ctrAddr = DEFAULT_CONTROLLER_ADDR;
     const rigAddr = this.civ.civAddress & 0xff;
     const raw = Math.max(0, Math.min(255, Math.round(value * 255)));
     const bcd = intToTwoByteBcd(raw);
-    this.sendCiv(IcomRigCommands.set0x14Level(ctrAddr, rigAddr, subcmd, bcd[0], bcd[1]));
-  }
-
-  // Start meter polling like Java (every 500ms when PTT is on)
-  private startMeterPolling() {
-    this.stopMeterPolling();
-    const ctrAddr = DEFAULT_CONTROLLER_ADDR;
-    const rigAddr = this.civ.civAddress & 0xff;
-    this.meterTimer = setInterval(() => {
-      if (!this.audio.isPttOn) return; // safety
-      this.sendCiv(IcomRigCommands.getSWRState(ctrAddr, rigAddr));
-      this.sendCiv(IcomRigCommands.getALCState(ctrAddr, rigAddr));
-    }, METER_TIMER_PERIOD_MS);
-  }
-
-  private stopMeterPolling() {
-    if (this.meterTimer) { clearInterval(this.meterTimer); this.meterTimer = undefined; }
+    await this.writeCiv(IcomRigCommands.set0x14Level(ctrAddr, rigAddr, subcmd, bcd[0], bcd[1]));
   }
 
   private onAudioData(buf: Buffer) {
+    if (buf.length < 16 || le32.read(buf, 0) !== buf.length) return;
+    if (ControlPacket.getType(buf) === Cmd.RETRANSMIT) {
+      if (buf.length === 16 || (buf.length - 16) % 4 === 0) this.audioSess.handleRetransmit(buf);
+      return;
+    }
+    if (this.connectionSession.phase === ConnectionPhase.DISCONNECTING) return;
+
     if (buf.length === Sizes.CONTROL) {
       const type = ControlPacket.getType(buf);
       // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -2976,8 +2863,8 @@ export class IcomControl {
     // AUDIO frames (len >= 0x18 and datalen matches). We don't strictly validate ident here to support variants.
     if (buf.length >= 0x18) {
       // datalen is BE (Java uses shortToByte which is big-endian)
-      const dataLen = buf.readUInt16BE(0x16);
-      if (buf.length === 0x18 + dataLen && dataLen > 0 && dataLen <= 2048) {
+      const dataLen = be16.read(buf, 0x16);
+      if (buf.length === 0x18 + dataLen && dataLen > 0 && dataLen <= 2048 && dataLen % 2 === 0) {
         const audio = Buffer.from(buf.subarray(0x18, 0x18 + dataLen));
         // Surface the wire-level sequence number (0x12 BE) and RX arrival time so
         // consumers can detect packet loss/reordering at the application layer.
@@ -2996,7 +2883,7 @@ export class IcomControl {
     if (buf.length === Sizes.CONTROL && ControlPacket.getType(buf) === Cmd.RETRANSMIT) {
       this.audioSess?.retransmit(ControlPacket.getSeq(buf));
     } else if (ControlPacket.getType(buf) === Cmd.RETRANSMIT && buf.length > Sizes.CONTROL) {
-      for (let i = 0x10; i + 1 < buf.length; i += 2) this.audioSess?.retransmit(buf.readUInt16LE(i));
+      for (let i = 0x10; i + 1 < buf.length; i += 2) this.audioSess?.retransmit(le16.read(buf, i));
     }
     // audio data routed by main handler already (if using single session). Here we may add specific behaviors if needed.
   }
@@ -3059,173 +2946,57 @@ export class IcomControl {
    * @private
    */
   private handleConnectionLost(sessionType: SessionType, timeSinceLastData: number) {
-    // Record disconnect time for downtime calculation
+    if (this.connectionSession.phase !== ConnectionPhase.CONNECTED) return;
     this.connectionSession.lastDisconnectTime = Date.now();
-
-    const info: ConnectionLostInfo = {
-      sessionType,
-      reason: `No data received for ${timeSinceLastData}ms`,
-      timeSinceLastData,
-      timestamp: this.connectionSession.lastDisconnectTime
-    };
-    dbg(`Connection lost: ${sessionType} session (${timeSinceLastData}ms since last data)`);
+    this.transitionTo(ConnectionPhase.DISCONNECTING, 'Connection lost');
+    const info: ConnectionLostInfo = { sessionType, timeSinceLastData,
+      reason: `No valid response for ${timeSinceLastData}ms`, timestamp: Date.now() };
+    const cleanup = this.releaseResources();
     this.ev.emit('connectionLost', info);
-
-    // Check if auto-reconnect is enabled
-    if (!this.monitorConfig.autoReconnect) {
-      dbg(`Auto-reconnect disabled, not attempting reconnect`);
-      // Transition to IDLE since we won't reconnect
-      this.transitionTo(ConnectionPhase.IDLE, 'Connection lost, auto-reconnect disabled');
-      return;
-    }
-
-    // Validate state transition to RECONNECTING
-    if (!this.canTransitionTo(ConnectionPhase.RECONNECTING)) {
-      dbg(`Cannot transition to RECONNECTING from ${this.connectionSession.phase} - skipping reconnect`);
-      return;
-    }
-
-    // Simplified strategy: any session loss → full reconnect
-    // This is more reliable than trying to reconnect individual sessions
-    dbg(`${sessionType} session lost - initiating full reconnect`);
-    this.scheduleFullReconnect();
+    const generation = this.connectionSession.sessionId;
+    void cleanup.then(() => {
+      if (generation !== this.connectionSession.sessionId) return;
+      this.transitionTo(ConnectionPhase.IDLE, 'Lost session released');
+      if (this.monitorConfig.autoReconnect) void this.scheduleFullReconnect();
+    }).catch(error => this.handleTransportError(error));
   }
 
-  /**
-   * Schedule a full reconnection (all sessions)
-   * Uses simple while loop with exponential backoff
-   * @private
-   */
   private async scheduleFullReconnect() {
-    // Prevent multiple concurrent reconnect attempts
-    if (this.connectionSession.phase === ConnectionPhase.RECONNECTING) {
-      dbg('Full reconnect already in progress, skipping');
-      return;
-    }
-
-    // Transition to RECONNECTING state
-    this.transitionTo(ConnectionPhase.RECONNECTING, 'Starting full reconnect');
-
-    let attempt = 0;
-    const disconnectTime = this.connectionSession.lastDisconnectTime || Date.now();
-
+    if (this.reconnectAbort && !this.reconnectAbort.signal.aborted) return;
+    const controller = new AbortController();
+    this.reconnectAbort = controller;
+    const started = Date.now();
     try {
-      while (true) {
-        attempt++;
+      for (let attempt = 1; !controller.signal.aborted; attempt++) {
         const delay = this.calculateReconnectDelay(attempt);
-
-        // Emit reconnect attempting event
-        this.ev.emit('reconnectAttempting', {
-          sessionType: SessionType.CONTROL,
-          attemptNumber: attempt,
-          delay,
-          timestamp: Date.now(),
-          fullReconnect: true
-        });
-
-        dbg(`Full reconnect attempt #${attempt} (delay: ${delay}ms)`);
-        await this.sleep(delay);
-
+        this.ev.emit('reconnectAttempting', { sessionType: SessionType.CONTROL, attemptNumber: attempt,
+          delay, timestamp: Date.now(), fullReconnect: true });
+        await this.sleep(delay, controller.signal);
         try {
-          // Disconnect all sessions - wrap in try-catch to prevent disconnect errors from aborting reconnect
-          dbg('Full reconnect: disconnecting all sessions');
-          try {
-            await this.disconnect();
-          } catch (disconnectErr) {
-            // Log but don't fail - we still want to attempt reconnect even if disconnect fails
-            const errMsg = disconnectErr instanceof Error ? disconnectErr.message : String(disconnectErr);
-            dbg(`Warning: Disconnect failed during reconnect: ${errMsg} - continuing with reconnect anyway`);
-          }
-
-          // Wait longer before reconnecting to allow rig to fully clean up old connection
-          // This is critical - rig may report CONNINFO busy=true if we reconnect too quickly
-          dbg('Full reconnect: waiting 5s for rig to clean up old session...');
-          await this.sleep(5000);
-
-          // Reconnect with timeout (uses new state-machine-based connect())
-          dbg('Full reconnect: reconnecting');
-          await this.connectWithTimeout(30000);
-
-          // Success! Calculate downtime and emit connectionRestored event
-          const downtime = Date.now() - disconnectTime;
-          dbg(`Full reconnect successful! Downtime: ${downtime}ms`);
-
-          const finalState = this.getConnectionState();
-          dbg(`Reconnect complete - All sessions: Control=${finalState.control}, CIV=${finalState.civ}, Audio=${finalState.audio}`);
-
-          // Emit connectionRestored event (fixes Problem #5)
-          this.ev.emit('connectionRestored', {
-            sessionType: SessionType.CONTROL,
-            downtime,
-            timestamp: Date.now()
-          });
-
-          // State is already CONNECTED from connect() call
+          await this.connect({ signal: controller.signal });
+          if (controller.signal.aborted) return;
+          this.ev.emit('connectionRestored', { sessionType: SessionType.CONTROL, downtime: Date.now() - started, timestamp: Date.now() });
           return;
-
-        } catch (err) {
-          const errorMsg = err instanceof Error ? err.message : String(err);
-          dbg('Full reconnect failed:', errorMsg);
-
-          // Get current connection state for diagnostics
-          const state = this.getConnectionState();
-          dbg(`Current state after failed reconnect: Control=${state.control}, CIV=${state.civ}, Audio=${state.audio}`);
-
-          // Check if we should retry
-          const maxAttempts = this.monitorConfig.maxReconnectAttempts;
-          const willRetry = maxAttempts === undefined || attempt < maxAttempts;
-
-          // Emit reconnect failed event
-          this.ev.emit('reconnectFailed', {
-            sessionType: SessionType.CONTROL,
-            attemptNumber: attempt,
-            error: errorMsg,
-            timestamp: Date.now(),
-            fullReconnect: true,
-            willRetry,
-            nextRetryDelay: willRetry ? this.calculateReconnectDelay(attempt + 1) : undefined
-          });
-
-          if (!willRetry) {
-            dbg(`Max reconnect attempts (${maxAttempts}) reached, giving up`);
-            dbg(`Final state: Control=${state.control}, CIV=${state.civ}, Audio=${state.audio}`);
-            // Transition to IDLE since we're giving up
-            this.transitionTo(ConnectionPhase.IDLE, 'Max reconnect attempts reached');
-            return;
-          }
-
-          // Continue loop for retry
-          dbg(`Will retry in ${this.calculateReconnectDelay(attempt + 1)}ms...`);
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          const willRetry = this.monitorConfig.maxReconnectAttempts === undefined || attempt < this.monitorConfig.maxReconnectAttempts;
+          this.ev.emit('reconnectFailed', { sessionType: SessionType.CONTROL, attemptNumber: attempt,
+            error: String(error), timestamp: Date.now(), fullReconnect: true, willRetry,
+            nextRetryDelay: willRetry ? this.calculateReconnectDelay(attempt + 1) : undefined });
+          if (!willRetry) return;
         }
       }
-    } catch (err) {
-      // Unexpected error in reconnect loop
-      dbg('Unexpected error in scheduleFullReconnect:', err);
-      this.transitionTo(ConnectionPhase.IDLE, 'Reconnect loop error');
-    }
+    } catch { /* Explicit disconnect cancels the backoff. */ }
+    finally { if (this.reconnectAbort === controller) this.reconnectAbort = undefined; }
   }
 
-  /**
-   * Connect with timeout (helper for reconnection)
-   * @private
-   */
-  private async connectWithTimeout(timeout: number): Promise<void> {
-    const timeoutPromise = this.sleep(timeout).then(() => {
-      throw new Error(`Connection timeout after ${timeout}ms`);
+  private sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) { reject(new Error('ICOM wait cancelled')); return; }
+      const abort = () => { clearTimeout(timer); reject(new Error('ICOM wait cancelled')); };
+      const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve(); }, ms);
+      signal?.addEventListener('abort', abort, { once: true });
     });
-
-    await Promise.race([
-      this.connect(),
-      timeoutPromise
-    ]);
-  }
-
-  /**
-   * Sleep helper (returns a Promise)
-   * @private
-   */
-  private sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   /**

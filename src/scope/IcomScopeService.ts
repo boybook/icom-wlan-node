@@ -30,6 +30,8 @@ export class IcomScopeService extends EventEmitter {
     this.freqLen = options?.freqLen ?? 5;
   }
 
+  reset(): void { this.assemblies.clear(); }
+
   handleCivFrame(frame: Buffer, transport: IcomScopeTransport): IcomScopeFrame | null {
     const segment = parseScopeSegment(frame, transport, this.freqLen);
     if (!segment) return null;
@@ -58,7 +60,7 @@ export class IcomScopeService extends EventEmitter {
     } else {
       const state = this.assemblies.get(key);
       if (!state) return null;
-      if (state.expectedMax !== segment.sequenceMax) {
+      if (state.expectedMax !== segment.sequenceMax || segment.sequence !== state.rawCivPayloads.length + 1) {
         this.assemblies.delete(key);
         return null;
       }

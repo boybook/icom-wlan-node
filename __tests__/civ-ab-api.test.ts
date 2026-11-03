@@ -19,7 +19,7 @@ describe('Hamlib A/B CI-V API expansion', () => {
 
   beforeEach(() => {
     openSpy = jest.spyOn(Session.prototype, 'open').mockImplementation(function mockOpen(this: Session) {
-      return this;
+      return Promise.resolve();
     });
   });
 
@@ -27,16 +27,17 @@ describe('Hamlib A/B CI-V API expansion', () => {
     openSpy.mockRestore();
   });
 
-  test('function commands use Hamlib 0x16 subcommands and BKIN special values', () => {
+  test('function commands use Hamlib 0x16 subcommands and BKIN special values', async () => {
     const rig = makeRig('IC-705');
     const sent: Buffer[] = [];
-    (rig as any).sendCiv = (buf: Buffer) => sent.push(Buffer.from(buf));
+    (rig as any).sendCiv = (buf: Buffer) => {
+      queueMicrotask(() => rig.events.emit('civFrame', Buffer.from([0xfe, 0xfe, 0xe0, rig.civ.civAddress, 0xfb, 0xfd]))); sent.push(Buffer.from(buf)); };
 
-    rig.setFunction('NR', true);
-    rig.setFunction('NB', true);
-    rig.setBreakInMode('semi');
-    rig.setBreakInMode('full');
-    rig.setDialLockEnabled(true);
+    await rig.setFunction('NR', true);
+    await rig.setFunction('NB', true);
+    await rig.setBreakInMode('semi');
+    await rig.setBreakInMode('full');
+    await rig.setDialLockEnabled(true);
 
     expect(sent).toEqual([
       Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x16, 0x40, 0x01, 0xfd]),
@@ -47,18 +48,19 @@ describe('Hamlib A/B CI-V API expansion', () => {
     ]);
   });
 
-  test('generic level API encodes Hamlib 0x14 levels and special CWPITCH/KEYSPD mappings', () => {
+  test('generic level API encodes Hamlib 0x14 levels and special CWPITCH/KEYSPD mappings', async () => {
     const rig = makeRig('IC-705');
     const sent: Buffer[] = [];
-    (rig as any).sendCiv = (buf: Buffer) => sent.push(Buffer.from(buf));
+    (rig as any).sendCiv = (buf: Buffer) => {
+      queueMicrotask(() => rig.events.emit('civFrame', Buffer.from([0xfe, 0xfe, 0xe0, rig.civ.civAddress, 0xfb, 0xfd]))); sent.push(Buffer.from(buf)); };
 
-    rig.setRFGain(0.5);
-    rig.setPbtIn(0.25);
-    rig.setPbtOut(0.75);
-    rig.setCwPitch(900);
-    rig.setKeySpeed(48);
-    rig.setMonitorGain(1);
-    rig.setVoxGain(0);
+    await rig.setRFGain(0.5);
+    await rig.setPbtIn(0.25);
+    await rig.setPbtOut(0.75);
+    await rig.setCwPitch(900);
+    await rig.setKeySpeed(48);
+    await rig.setMonitorGain(1);
+    await rig.setVoxGain(0);
 
     expect(sent).toEqual([
       Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x14, 0x02, 0x01, 0x28, 0xfd]),
@@ -75,6 +77,7 @@ describe('Hamlib A/B CI-V API expansion', () => {
     const rig = makeRig('IC-705');
     const sent: Buffer[] = [];
     (rig as any).sendCiv = (buf: Buffer) => {
+      queueMicrotask(() => rig.events.emit('civFrame', Buffer.from([0xfe, 0xfe, 0xe0, rig.civ.civAddress, 0xfb, 0xfd])));
       sent.push(Buffer.from(buf));
       if (buf[4] === 0x16 && buf[5] === 0x40) {
         setTimeout(() => rig.events.emit('civFrame', Buffer.from([0xfe, 0xfe, DEFAULT_CONTROLLER_ADDR, 0xa4, 0x16, 0x40, 0x01, 0xfd])), 0);
@@ -91,18 +94,19 @@ describe('Hamlib A/B CI-V API expansion', () => {
     ]);
   });
 
-  test('RIT/XIT, split frequency/mode, repeater offset, and CTCSS tone commands match Hamlib', () => {
+  test('RIT/XIT, split frequency/mode, repeater offset, and CTCSS tone commands match Hamlib', async () => {
     const rig = makeRig('IC-705');
     const sent: Buffer[] = [];
-    (rig as any).sendCiv = (buf: Buffer) => sent.push(Buffer.from(buf));
+    (rig as any).sendCiv = (buf: Buffer) => {
+      queueMicrotask(() => rig.events.emit('civFrame', Buffer.from([0xfe, 0xfe, 0xe0, rig.civ.civAddress, 0xfb, 0xfd]))); sent.push(Buffer.from(buf)); };
 
-    rig.setRitOffset(-1234);
-    rig.setRitEnabled(true);
-    rig.setXitEnabled(false);
-    rig.setSplitFrequency(14_074_000);
-    rig.setSplitMode('USB', { dataMode: true, filter: 2 });
-    rig.setRepeaterOffset(600_000);
-    rig.setToneFrequency(88.5);
+    await rig.setRitOffset(-1234);
+    await rig.setRitEnabled(true);
+    await rig.setXitEnabled(false);
+    await rig.setSplitFrequency(14_074_000);
+    await rig.setSplitMode('USB', { dataMode: true, filter: 2 });
+    await rig.setRepeaterOffset(600_000);
+    await rig.setToneFrequency(88.5);
 
     expect(sent).toEqual([
       Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x21, 0x00, 0x34, 0x12, 0x01, 0xfd]),
@@ -118,20 +122,22 @@ describe('Hamlib A/B CI-V API expansion', () => {
   test('profile ext params support AFIF routing and USB AF profile differences', async () => {
     const rig705 = makeRig('IC-705');
     const sent705: Buffer[] = [];
-    (rig705 as any).sendCiv = (buf: Buffer) => sent705.push(Buffer.from(buf));
-    rig705.setAudioIfMode('wlan');
+    (rig705 as any).sendCiv = (buf: Buffer) => {
+      queueMicrotask(() => rig705.events.emit('civFrame', Buffer.from([0xfe, 0xfe, 0xe0, rig705.civ.civAddress, 0xfb, 0xfd]))); sent705.push(Buffer.from(buf)); };
+    await rig705.setAudioIfMode('wlan');
     await rig705.setUsbAfLevel(121);
 
     expect(sent705).toEqual([
       Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x1a, 0x05, 0x01, 0x14, 0x01, 0xfd]),
       Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x1a, 0x05, 0x01, 0x09, 0x01, 0xfd]),
-      Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x1a, 0x05, 0x01, 0x13, 0x01, 0x21, 0xfd]),
+      Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x1a, 0x05, 0x01, 0x10, 0x01, 0x21, 0xfd]),
     ]);
 
     const rig9700 = makeRig('IC-9700');
     const sent9700: Buffer[] = [];
-    (rig9700 as any).sendCiv = (buf: Buffer) => sent9700.push(Buffer.from(buf));
-    rig9700.setAudioIfMode('lan');
+    (rig9700 as any).sendCiv = (buf: Buffer) => {
+      queueMicrotask(() => rig9700.events.emit('civFrame', Buffer.from([0xfe, 0xfe, 0xe0, rig9700.civ.civAddress, 0xfb, 0xfd]))); sent9700.push(Buffer.from(buf)); };
+    await rig9700.setAudioIfMode('lan');
     expect(sent9700).toEqual([
       Buffer.from([0xfe, 0xfe, 0xa2, DEFAULT_CONTROLLER_ADDR, 0x1a, 0x05, 0x01, 0x10, 0x01, 0xfd]),
       Buffer.from([0xfe, 0xfe, 0xa2, DEFAULT_CONTROLLER_ADDR, 0x1a, 0x05, 0x01, 0x00, 0x00, 0xfd]),
@@ -142,18 +148,19 @@ describe('Hamlib A/B CI-V API expansion', () => {
     await expect(rig7760.setUsbAfLevel(10)).rejects.toThrow('Unsupported ICOM CI-V command');
   });
 
-  test('spectrum advanced commands encode speed, ref, VBW/RBW, TX, center type, and avg', () => {
+  test('spectrum advanced commands encode speed, ref, VBW/RBW, TX, center type, and avg', async () => {
     const rig = makeRig('IC-705');
     const sent: Buffer[] = [];
-    (rig as any).sendCiv = (buf: Buffer) => sent.push(Buffer.from(buf));
+    (rig as any).sendCiv = (buf: Buffer) => {
+      queueMicrotask(() => rig.events.emit('civFrame', Buffer.from([0xfe, 0xfe, 0xe0, rig.civ.civAddress, 0xfb, 0xfd]))); sent.push(Buffer.from(buf)); };
 
-    rig.setSpectrumHold(true, { receiver: 0 });
-    rig.setSpectrumSpeed('slow', { receiver: 0 });
-    rig.setSpectrumRef(-12.4, { receiver: 0 });
-    rig.setSpectrumVbw(1, { receiver: 0 });
-    rig.setSpectrumDuringTx(true);
-    rig.setSpectrumCenterType('carrier-point-center-abs');
-    rig.setSpectrumAverage(3);
+    await rig.setSpectrumHold(true, { receiver: 0 });
+    await rig.setSpectrumSpeed('slow', { receiver: 0 });
+    await rig.setSpectrumRef(-12.4, { receiver: 0 });
+    await rig.setSpectrumVbw(1, { receiver: 0 });
+    await rig.setSpectrumDuringTx(true);
+    await rig.setSpectrumCenterType('carrier-point-center-abs');
+    await rig.setSpectrumAverage(3);
 
     expect(sent).toEqual([
       Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x27, 0x17, 0x00, 0x01, 0xfd]),

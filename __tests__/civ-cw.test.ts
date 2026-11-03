@@ -25,7 +25,7 @@ describe('Hamlib-aligned ICOM CW text sending', () => {
 
   beforeEach(() => {
     openSpy = jest.spyOn(Session.prototype, 'open').mockImplementation(function mockOpen(this: Session) {
-      return this;
+      return Promise.resolve();
     });
   });
 

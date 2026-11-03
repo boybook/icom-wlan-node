@@ -26,7 +26,7 @@ describe('Hamlib-aligned CI-V profile behavior', () => {
 
   beforeEach(() => {
     openSpy = jest.spyOn(Session.prototype, 'open').mockImplementation(function mockOpen(this: Session) {
-      return this;
+      return Promise.resolve();
     });
   });
 
@@ -34,13 +34,13 @@ describe('Hamlib-aligned CI-V profile behavior', () => {
     openSpy.mockRestore();
   });
 
-  test('buildCivFrame creates standard FE FE rig ctrl command frames', () => {
+  test('buildCivFrame creates standard FE FE rig ctrl command frames', async () => {
     expect(buildCivFrame({ rigAddr: 0xa4, ctrlAddr: 0xe0, cmd: 0x1c, subcmd: 0x00, payload: [0x01] })).toEqual(
       Buffer.from([0xfe, 0xfe, 0xa4, 0xe0, 0x1c, 0x00, 0x01, 0xfd])
     );
   });
 
-  test('0x14 level subcommands match Hamlib definitions', () => {
+  test('0x14 level subcommands match Hamlib definitions', async () => {
     expect(IcomRigCommands.get0x14Level(DEFAULT_CONTROLLER_ADDR, 0xa4, CIV.S_LVL_MICGAIN)).toEqual(
       Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x14, 0x0b, 0xfd])
     );
@@ -64,7 +64,10 @@ describe('Hamlib-aligned CI-V profile behavior', () => {
   test('modern profiles use 0x26 selected-mode command with data mode and filter', async () => {
     const rig = makeRig('IC-705');
     const sent: Buffer[] = [];
-    (rig as any).sendCiv = (buf: Buffer) => sent.push(Buffer.from(buf));
+    (rig as any).sendCiv = (buf: Buffer) => {
+      queueMicrotask(() => rig.events.emit('civFrame', Buffer.from([0xfe, 0xfe, 0xe0, rig.civ.civAddress, 0xfb, 0xfd])));
+      sent.push(Buffer.from(buf));
+    };
 
     await rig.setMode('USB');
     await rig.setMode('USB', { dataMode: true, filter: 2 });
@@ -79,7 +82,10 @@ describe('Hamlib-aligned CI-V profile behavior', () => {
     const rig = makeRig('generic-modern-icom');
     (rig as any).activeProfile = { ...(rig as any).activeProfile, supportsX25X26: false, modeWithFilter: false };
     const sent: Buffer[] = [];
-    (rig as any).sendCiv = (buf: Buffer) => sent.push(Buffer.from(buf));
+    (rig as any).sendCiv = (buf: Buffer) => {
+      queueMicrotask(() => rig.events.emit('civFrame', Buffer.from([0xfe, 0xfe, 0xe0, rig.civ.civAddress, 0xfb, 0xfd])));
+      sent.push(Buffer.from(buf));
+    };
 
     await rig.setMode('USB', { filter: 3 });
 
@@ -91,7 +97,10 @@ describe('Hamlib-aligned CI-V profile behavior', () => {
   test('modern profiles use 0x25 selected-frequency and IC-905 uses 6-byte BCD above 5.85GHz', async () => {
     const rig = makeRig('IC-905');
     const sent: Buffer[] = [];
-    (rig as any).sendCiv = (buf: Buffer) => sent.push(Buffer.from(buf));
+    (rig as any).sendCiv = (buf: Buffer) => {
+      queueMicrotask(() => rig.events.emit('civFrame', Buffer.from([0xfe, 0xfe, 0xe0, rig.civ.civAddress, 0xfb, 0xfd])));
+      sent.push(Buffer.from(buf));
+    };
 
     await rig.setFrequency(10_368_000_000);
 
@@ -114,7 +123,10 @@ describe('Hamlib-aligned CI-V profile behavior', () => {
   test('tuner commands use standard 0x1c/0x01 family', async () => {
     const rig = makeRig('IC-705');
     const sent: Buffer[] = [];
-    (rig as any).sendCiv = (buf: Buffer) => sent.push(Buffer.from(buf));
+    (rig as any).sendCiv = (buf: Buffer) => {
+      queueMicrotask(() => rig.events.emit('civFrame', Buffer.from([0xfe, 0xfe, 0xe0, rig.civ.civAddress, 0xfb, 0xfd])));
+      sent.push(Buffer.from(buf));
+    };
 
     await rig.setTunerEnabled(true);
     await rig.startManualTune();
@@ -128,7 +140,10 @@ describe('Hamlib-aligned CI-V profile behavior', () => {
   test('profile-gated connector extensions use configured subext or reject unsupported models', async () => {
     const rig = makeRig('IC-705');
     const sent: Buffer[] = [];
-    (rig as any).sendCiv = (buf: Buffer) => sent.push(Buffer.from(buf));
+    (rig as any).sendCiv = (buf: Buffer) => {
+      queueMicrotask(() => rig.events.emit('civFrame', Buffer.from([0xfe, 0xfe, 0xe0, rig.civ.civAddress, 0xfb, 0xfd])));
+      sent.push(Buffer.from(buf));
+    };
 
     await rig.setConnectorWLanLevel(120);
     await rig.setConnectorDataMode('WLAN');
@@ -137,7 +152,7 @@ describe('Hamlib-aligned CI-V profile behavior', () => {
     expect(sent).toEqual([
       Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x1a, 0x05, 0x01, 0x17, 0x01, 0x20, 0xfd]),
       Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x1a, 0x05, 0x01, 0x19, 0x03, 0xfd]),
-      Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x1a, 0x05, 0x01, 0x13, 0x01, 0x21, 0xfd]),
+      Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x1a, 0x05, 0x01, 0x10, 0x01, 0x21, 0xfd]),
     ]);
 
     const generic = makeRig('generic-modern-icom');
@@ -148,6 +163,7 @@ describe('Hamlib-aligned CI-V profile behavior', () => {
     const rig = makeRig('generic-modern-icom');
     const sent: Buffer[] = [];
     (rig as any).sendCiv = (buf: Buffer) => {
+      queueMicrotask(() => rig.events.emit('civFrame', Buffer.from([0xfe, 0xfe, 0xe0, rig.civ.civAddress, 0xfb, 0xfd])));
       sent.push(Buffer.from(buf));
       setTimeout(() => rig.events.emit('civFrame', Buffer.from([
         0xfe, 0xfe, DEFAULT_CONTROLLER_ADDR, 0xa4,
@@ -172,6 +188,7 @@ describe('Hamlib-aligned CI-V profile behavior', () => {
     const rig = makeRig('IC-705');
     const sent: Buffer[] = [];
     (rig as any).sendCiv = (buf: Buffer) => {
+      queueMicrotask(() => rig.events.emit('civFrame', Buffer.from([0xfe, 0xfe, 0xe0, rig.civ.civAddress, 0xfb, 0xfd])));
       sent.push(Buffer.from(buf));
       setTimeout(() => rig.events.emit('civFrame', Buffer.from([
         0xfe, 0xfe, DEFAULT_CONTROLLER_ADDR, 0xa4,
@@ -179,14 +196,14 @@ describe('Hamlib-aligned CI-V profile behavior', () => {
       ])), 0);
     };
 
-    await expect(rig.getConnectorDataMode({ timeout: 1000 })).resolves.toBe('USB');
+    await expect(rig.getConnectorDataMode({ timeout: 1000 })).resolves.toBe('MIC_USB');
     expect(sent[0]).toEqual(Buffer.from([
       0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR,
       0x1a, 0x05, 0x01, 0x19, 0xfd,
     ]));
   });
 
-  test('does not let generic profile shadow IC-705 address matching', () => {
+  test('does not let generic profile shadow IC-705 address matching', async () => {
     expect(resolveIcomProfile({ requestedModel: 'auto', civAddress: 0xa4 }).modelId).toBe('IC-705');
   });
 
@@ -194,6 +211,7 @@ describe('Hamlib-aligned CI-V profile behavior', () => {
     const rig = makeRig('IC-705');
     const sent: Buffer[] = [];
     (rig as any).sendCiv = (buf: Buffer) => {
+      queueMicrotask(() => rig.events.emit('civFrame', Buffer.from([0xfe, 0xfe, 0xe0, rig.civ.civAddress, 0xfb, 0xfd])));
       sent.push(Buffer.from(buf));
       setTimeout(() => rig.events.emit('civFrame', Buffer.from([0xfe, 0xfe, DEFAULT_CONTROLLER_ADDR, 0xa4, 0x1c, 0x00, 0x01, 0xfd])), 0);
     };

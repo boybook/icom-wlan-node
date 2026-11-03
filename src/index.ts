@@ -46,3 +46,5 @@ export {
   UnsupportedCommandError,
   getDisconnectMessage
 } from './utils/errors';
+
+export { CivCommandRejectedError } from './rig/IcomCivRequestManager';

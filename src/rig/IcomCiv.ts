@@ -11,6 +11,8 @@ export class IcomCiv {
 
   constructor(private sess: Session) {}
 
+  reset() { this.stop(); this.civSeq = 0; }
+
   start() {
     this.stop();
     // CIV session watchdog: Keep-alive mechanism to maintain CIV connection

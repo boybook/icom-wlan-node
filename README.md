@@ -654,3 +654,61 @@ ICOM_IP=192.168.31.253 ICOM_PORT=50001 ICOM_USER=icom ICOM_PASS=icomicom npm tes
 ## License
 
 MIT
+
+## Connection and command lifecycle
+
+`connect({ timeout, signal })` bounds the entire handshake (15 seconds by
+default), including socket binding, login and both CI-V/audio streams. Error
+messages identify the failed stage. `disconnect()` is safe before connection,
+after partial failure and while connecting, and releases sockets, timers,
+requests and the granted token. Concurrent disconnects share completion;
+late packets cannot restore a cancelled generation. An optional
+`IcomRigOptions.logger(message, details)` receives bounded lifecycle diagnostics
+without credentials or raw packets. The application may disable automatic
+reconnect and own retry policy itself.
+
+CI-V commands share a serialized reply stream because ACK/NAK does not identify
+its originating command. **Await every public setter**, including setters that
+previously returned `void`: completion now means the device acknowledged the
+write. NAK rejects with `CivCommandRejectedError`. A write timeout cancels queued
+commands and retires the uncertain connection. Ordinary read timeout still
+returns `null`. Identical concurrent requests are deduplicated. Raw `sendCiv()`
+remains an advanced API requiring a complete CI-V frame; mixing it with managed
+transactions requires caller coordination. `setPowerState('on' | 'off')` builds
+and acknowledges a complete power command.
+
+Observation policy belongs to the caller: PTT no longer starts a second meter
+poller. Tracked UDP packets use bounded retransmission history and a receive
+window that reorders packets, requests gaps and eventually advances over lost
+packets. Audio consumers retain wire sequence numbers for unrecovered-loss
+compensation. No sockets are opened by the constructor; low-level callers of
+`Session.open()` / `UdpClient.open()` must await socket binding.
+
+## IC-705 and IC-7300MK2
+
+IC-7300MK2 has an independent profile (default CI-V address/ID B6), rather than
+inheriting the original IC-7300 table. IC-705 uses A4. Exact normalized aliases
+are supported, and CI-V `19 00` identity takes precedence over name/address
+hints without changing a user-configured bus address. An unknown authoritative
+ID clears a guessed model profile.
+
+MK2 USB AF, LAN AF/IF, LAN modulation and DATA MOD use model-specific addresses.
+The existing `WLAN` connector API name denotes network input and maps to LAN
+code 05 on MK2. IC-705 uses USB=01, MIC+USB=02 and WLAN=03; combined inputs use
+`MIC_USB` / `MIC_ACC` names where supported. USB AF output on IC-705 uses
+`1A 05 01 10`, distinct from USB IF output at `01 13`.
+
+Protocol/model references:
+
+- [Icom IC-705 CI-V Reference Guide](https://www.icomjapan.com/support/manual/3064/)
+- [Icom IC-7300MK2 CI-V Reference Guide](https://www.icomjapan.com/support/manual/4486/)
+- [wfview UDP implementation](https://gitlab.com/eliggett/wfview/-/blob/e2235b2729d7712afbf1dd25b975658073b8359f/src/radio/icomudpbase.cpp)
+- [Hamlib session teardown and handshake](https://github.com/Hamlib/Hamlib/blob/5fb1ef9f9481e2ddba0a0a3cb8ba63271c1470ee/rigs/icom/network_session.c)
+- [kappanhang sequence buffering](https://github.com/nonoo/kappanhang/blob/66f2369efcddd4c00caf4d2ddf0e54116582cfaf/seqbuf.go)
+
+`wlan-recovery.test.ts` exercises production sessions and parsers against an
+in-memory UDP peer (handshake, login rejection, missing response recovery,
+cancellation, teardown, reconnect and acknowledged MK2 commands).
+`udp-window.test.ts` covers reorder, loss, duplicate, rollover, invalid-source
+and retransmit behavior. These are fast offline regressions, not certification
+of any firmware or physical-radio behavior.

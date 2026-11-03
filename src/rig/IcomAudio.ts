@@ -1,11 +1,13 @@
 import { AUDIO_SAMPLE_RATE, AudioPacket, TX_BUFFER_SIZE } from '../core/IcomPackets';
+import { dbgV } from '../utils/debug';
 import { Session } from '../core/Session';
 
 export class IcomAudio {
   private sendSeq = 0;
   private sendSeqForTiming = 0;  // Separate counter for drift compensation
   public isPttOn = false;
-  private txTimer?: NodeJS.Immediate;
+  private delayTimer?: NodeJS.Timeout;
+  private generation = 0;
   public queue: Int16Array[] = [];  // Public for PTT control to clear queue
   private volume = 1.0; // 0.0 ~ 2.0
   private running = false;
@@ -21,6 +23,8 @@ export class IcomAudio {
     // Start continuous audio transmission with drift compensation
     if (this.running) return;
     this.running = true;
+    this.generation++;
+    this.sendSeq = 0;
     this.startTime = performance.now();
     this.sendSeqForTiming = 0;
     this.frameCount = 0;
@@ -29,34 +33,21 @@ export class IcomAudio {
     this.scheduleSend();
   }
 
-  private scheduleSend() {
-    if (!this.running) return;
-
+  private scheduleSend(generation = this.generation) {
+    if (!this.running || generation !== this.generation) return;
     const now = performance.now();
-
-    // Calculate ideal send time for next frame (with drift compensation)
-    const nextFrameIndex = this.sendSeqForTiming + 1;
-    const idealTime = this.startTime + (nextFrameIndex * this.FRAME_INTERVAL_MS);
-    const timeUntilSend = idealTime - now;
-
-    if (timeUntilSend <= 0) {
-      // We're at or past send time! Send immediately
+    let due = this.startTime + (this.sendSeqForTiming + 1) * this.FRAME_INTERVAL_MS;
+    if (now - due > 100) {
+      this.queue.splice(0, Math.min(this.queue.length, Math.floor((now - due) / this.FRAME_INTERVAL_MS)));
+      this.startTime = now - (this.sendSeqForTiming + 1) * this.FRAME_INTERVAL_MS;
+      due = now;
+    }
+    if (now >= due) {
       this.sendFrame();
       this.sendSeqForTiming++;
-
-      // Schedule next check immediately (tight loop for precision)
-      this.txTimer = setImmediate(() => this.scheduleSend());
-    } else if (timeUntilSend <= 0.5) {
-      // Very close (within 0.5ms), tight loop with setImmediate
-      this.txTimer = setImmediate(() => this.scheduleSend());
-    } else if (timeUntilSend <= 3) {
-      // Close (1-3ms), use minimal setTimeout
-      setTimeout(() => this.scheduleSend(), 0);
-    } else {
-      // Further away, wait conservatively then tight loop
-      const waitTime = Math.max(1, Math.floor(timeUntilSend - 2));
-      setTimeout(() => this.scheduleSend(), waitTime);
     }
+    const next = this.startTime + (this.sendSeqForTiming + 1) * this.FRAME_INTERVAL_MS;
+    this.delayTimer = setTimeout(() => this.scheduleSend(generation), Math.max(1, Math.ceil(next - performance.now())));
   }
 
   private sendFrame() {
@@ -79,13 +70,13 @@ export class IcomAudio {
 
     // Debug: log timing info every 50 frames (~1 second)
     this.frameCount++;
-    if (this.frameCount % 50 === 0 && hasData) {
+    if (this.frameCount % 50 === 0) {
       const now = performance.now();
       if (this.debugIntervalStart > 0) {
         const elapsed = now - this.debugIntervalStart;
         const avgInterval = elapsed / 50;
         const drift = elapsed - (50 * this.FRAME_INTERVAL_MS);
-        console.log(`[AudioTiming] Avg: ${avgInterval.toFixed(2)}ms (target: ${this.FRAME_INTERVAL_MS}ms), drift: ${drift.toFixed(2)}ms, queue: ${this.queue.length}`);
+        dbgV(`[AudioTiming] Avg: ${avgInterval.toFixed(2)}ms (target: ${this.FRAME_INTERVAL_MS}ms), drift: ${drift.toFixed(2)}ms, queue: ${this.queue.length}`);
       }
       this.debugIntervalStart = now;
     }
@@ -94,10 +85,9 @@ export class IcomAudio {
   stop() {
     // Stop continuous audio transmission (only on disconnect)
     this.running = false;
-    if (this.txTimer) {
-      clearImmediate(this.txTimer);
-      this.txTimer = undefined;
-    }
+    this.generation++;
+    if (this.delayTimer) clearTimeout(this.delayTimer);
+    this.delayTimer = undefined;
     this.queue.length = 0;
     this.isPttOn = false;
     this.frameCount = 0;

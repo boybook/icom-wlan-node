@@ -21,12 +21,12 @@ function encodeFreq(hz: number, byteLength: number = 5): number[] {
 }
 
 describe('scope support', () => {
-  test('parseIcomBcdFreqLE decodes little-endian BCD frequency bytes', () => {
+  test('parseIcomBcdFreqLE decodes little-endian BCD frequency bytes', async () => {
     const encoded = Buffer.from(encodeFreq(145000000));
     expect(parseIcomBcdFreqLE(encoded)).toBe(145000000);
   });
 
-  test('parseScopeSegment parses sequence 1 header and center-mode pixels', () => {
+  test('parseScopeSegment parses sequence 1 header and center-mode pixels', async () => {
     const frame = makeScopeFrame([
       0x27, 0x00, 0x00,
       0x01, 0x03, 0x00,
@@ -79,7 +79,7 @@ describe('scope support', () => {
 
   test('IcomControl enableScope/disableScope send minimal command sequence', async () => {
     const openSpy = jest.spyOn(Session.prototype, 'open').mockImplementation(function mockOpen(this: Session) {
-      return this;
+      return Promise.resolve();
     });
 
     const rig = new IcomControl({
@@ -90,7 +90,8 @@ describe('scope support', () => {
 
     rig.civ.civAddress = 0xa4;
     const sent: Buffer[] = [];
-    (rig as any).sendCiv = (buf: Buffer) => { sent.push(Buffer.from(buf)); };
+    (rig as any).sendCiv = (buf: Buffer) => {
+      queueMicrotask(() => rig.events.emit('civFrame', Buffer.from([0xfe, 0xfe, 0xe0, rig.civ.civAddress, 0xfb, 0xfd]))); sent.push(Buffer.from(buf)); };
 
     await rig.enableScope();
     await rig.disableScope();
@@ -105,7 +106,7 @@ describe('scope support', () => {
     openSpy.mockRestore();
   });
 
-  test('IcomScopeCommands builds scope span read/write commands', () => {
+  test('IcomScopeCommands builds scope span read/write commands', async () => {
     expect(IcomScopeCommands.readScopeSpan(DEFAULT_CONTROLLER_ADDR, 0xa4, 0)).toEqual(
       Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x27, 0x15, 0x00, 0xfd])
     );
@@ -115,7 +116,7 @@ describe('scope support', () => {
     );
   });
 
-  test('IcomScopeCommands builds scope mode/edge/fixed-edge commands', () => {
+  test('IcomScopeCommands builds scope mode/edge/fixed-edge commands', async () => {
     expect(IcomScopeCommands.readScopeMode(DEFAULT_CONTROLLER_ADDR, 0xa4, 0)).toEqual(
       Buffer.from([0xfe, 0xfe, 0xa4, DEFAULT_CONTROLLER_ADDR, 0x27, 0x14, 0x00, 0xfd])
     );
@@ -138,7 +139,7 @@ describe('scope support', () => {
 
   test('IcomControl readScopeSpan parses CI-V reply', async () => {
     const openSpy = jest.spyOn(Session.prototype, 'open').mockImplementation(function mockOpen(this: Session) {
-      return this;
+      return Promise.resolve();
     });
 
     const rig = new IcomControl({
@@ -150,6 +151,7 @@ describe('scope support', () => {
     rig.civ.civAddress = 0xa4;
     const sent: Buffer[] = [];
     (rig as any).sendCiv = (buf: Buffer) => {
+      queueMicrotask(() => rig.events.emit('civFrame', Buffer.from([0xfe, 0xfe, 0xe0, rig.civ.civAddress, 0xfb, 0xfd])));
       sent.push(Buffer.from(buf));
       setTimeout(() => {
         rig.events.emit('civFrame', Buffer.from([
@@ -175,7 +177,7 @@ describe('scope support', () => {
 
   test('IcomControl reads scope mode, edge and fixed edge', async () => {
     const openSpy = jest.spyOn(Session.prototype, 'open').mockImplementation(function mockOpen(this: Session) {
-      return this;
+      return Promise.resolve();
     });
 
     const rig = new IcomControl({
@@ -186,6 +188,7 @@ describe('scope support', () => {
 
     rig.civ.civAddress = 0xa4;
     (rig as any).sendCiv = (buf: Buffer) => {
+      queueMicrotask(() => rig.events.emit('civFrame', Buffer.from([0xfe, 0xfe, 0xe0, rig.civ.civAddress, 0xfb, 0xfd])));
       const cmd = buf[5];
       setTimeout(() => {
         if (cmd === 0x14) {
@@ -224,7 +227,7 @@ describe('scope support', () => {
 
   test('IcomControl bridges civFrame into scope events', async () => {
     const openSpy = jest.spyOn(Session.prototype, 'open').mockImplementation(function mockOpen(this: Session) {
-      return this;
+      return Promise.resolve();
     });
 
     const rig = new IcomControl({
